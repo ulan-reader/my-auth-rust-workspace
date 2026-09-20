@@ -1,0 +1,728 @@
+﻿=== serde ===
+    Updating crates.io index
+    Updating crates.io index
+serde #serde #serialization #no_std
+A generic serialization/deserialization framework
+version: 1.0.229
+license: MIT OR Apache-2.0
+rust-version: 1.56
+documentation: https://docs.rs/serde
+homepage: https://serde.rs
+repository: https://github.com/serde-rs/serde
+crates.io: https://crates.io/crates/serde/1.0.229
+features:
+ +default      = [std]
+  std          = [serde_core/std]
+  alloc        = [serde_core/alloc]
+  derive       = [serde_derive]
+  rc           = [serde_core/rc]
+  serde_derive = [dep:serde_derive]
+  unstable     = [serde_core/unstable]
+
+=== serde_json ===
+    Updating crates.io index
+    Updating crates.io index
+serde_json #json #serde #serialization
+A JSON serialization file format
+version: 1.0.151
+license: MIT OR Apache-2.0
+rust-version: 1.71
+documentation: https://docs.rs/serde_json
+repository: https://github.com/serde-rs/json
+crates.io: https://crates.io/crates/serde_json/1.0.151
+features:
+ +default             = [std]
+  std                 = [memchr/std, serde_core/std]
+  alloc               = [serde_core/alloc]
+  arbitrary_precision = []
+  float_roundtrip     = []
+  indexmap            = [dep:indexmap]
+  preserve_order      = [indexmap, std]
+  raw_value           = []
+  unbounded_depth     = []
+
+=== thiserror ===
+    Updating crates.io index
+    Updating crates.io index
+thiserror #error #error-handling #derive
+derive(Error)
+version: 2.0.20
+license: MIT OR Apache-2.0
+rust-version: 1.71
+documentation: https://docs.rs/thiserror
+repository: https://github.com/dtolnay/thiserror
+crates.io: https://crates.io/crates/thiserror/2.0.20
+features:
+ +default = [std]
+  std     = []
+
+=== anyhow ===
+    Updating crates.io index
+    Updating crates.io index
+anyhow #error #error-handling
+Flexible concrete Error type built on std::error::Error
+version: 1.0.104
+license: MIT OR Apache-2.0
+rust-version: 1.68
+documentation: https://docs.rs/anyhow
+repository: https://github.com/dtolnay/anyhow
+crates.io: https://crates.io/crates/anyhow/1.0.104
+features:
+ +default   = [std]
+  std       = []
+  backtrace = []
+
+=== async-trait ===
+    Updating crates.io index
+    Updating crates.io index
+async-trait #async
+Type erasure for async trait methods
+version: 0.1.92
+license: MIT OR Apache-2.0
+rust-version: 1.71
+documentation: https://docs.rs/async-trait
+repository: https://github.com/dtolnay/async-trait
+crates.io: https://crates.io/crates/async-trait/0.1.92
+
+=== secrecy ===
+    Updating crates.io index
+    Updating crates.io index
+secrecy #clear #memory #secret #secure #wipe
+Wrapper types and traits for secret management which help ensure
+they aren't accidentally copied, logged, or otherwise exposed
+(as much as possible), and also ensure secrets are securely wiped
+from memory when dropped.
+version: 0.10.3
+license: Apache-2.0 OR MIT
+rust-version: 1.60
+documentation: https://docs.rs/secrecy/0.10.3
+homepage: https://github.com/iqlusioninc/crates/
+repository: https://github.com/iqlusioninc/crates/tree/main/secrecy
+crates.io: https://crates.io/crates/secrecy/0.10.3
+features:
+  serde = [dep:serde]
+
+=== chrono ===
+    Updating crates.io index
+    Updating crates.io index
+chrono #date #time #calendar
+Date and time library for Rust
+version: 0.4.45
+license: MIT OR Apache-2.0
+rust-version: 1.62.0
+documentation: https://docs.rs/chrono/
+homepage: https://github.com/chronotope/chrono
+repository: https://github.com/chronotope/chrono
+crates.io: https://crates.io/crates/chrono/0.4.45
+features:
+ +default           = [clock, std, oldtime, wasmbind]
+  alloc             = []
+  clock             = [winapi, iana-time-zone, now]
+  iana-time-zone    = [dep:iana-time-zone]
+  js-sys            = [dep:js-sys]
+  now               = [std]
+  oldtime           = []
+  std               = [alloc]
+  wasm-bindgen      = [dep:wasm-bindgen]
+  wasmbind          = [wasm-bindgen, js-sys]
+  winapi            = [windows-link]
+  windows-link      = [dep:windows-link]
+  __internal_bench  = []
+  arbitrary         = [dep:arbitrary]
+  core-error        = []
+  defmt             = [dep:defmt, pure-rust-locales?/defmt]
+  libc              = []
+  pure-rust-locales = [dep:pure-rust-locales]
+  rkyv              = [dep:rkyv, rkyv/size_32]
+  rkyv-16           = [dep:rkyv, rkyv?/size_16]
+  rkyv-32           = [dep:rkyv, rkyv?/size_32]
+  rkyv-64           = [dep:rkyv, rkyv?/size_64]
+  rkyv-validation   = [rkyv?/validation]
+  serde             = [dep:serde]
+  unstable-locales  = [pure-rust-locales]
+
+=== tracing ===
+    Updating crates.io index
+    Updating crates.io index
+tracing #logging #tracing #metrics #async
+Application-level tracing for Rust.
+version: 0.1.44
+license: MIT
+rust-version: 1.65.0
+documentation: https://docs.rs/tracing/0.1.44
+homepage: https://tokio.rs
+repository: https://github.com/tokio-rs/tracing
+crates.io: https://crates.io/crates/tracing/0.1.44
+features:
+ +default                 = [std, attributes]
+  attributes              = [tracing-attributes]
+  std                     = [tracing-core/std]
+  tracing-attributes      = [dep:tracing-attributes]
+  async-await             = []
+  log                     = [dep:log]
+  log-always              = [log]
+  max_level_debug         = []
+  max_level_error         = []
+  max_level_info          = []
+  max_level_off           = []
+  max_level_trace         = []
+  max_level_warn          = []
+  release_max_level_debug = []
+  release_max_level_error = []
+  release_max_level_info  = []
+  release_max_level_off   = []
+  release_max_level_trace = []
+  release_max_level_warn  = []
+  valuable                = [tracing-core/valuable]
+
+=== tokio ===
+    Updating crates.io index
+    Updating crates.io index
+tokio #io #async #non-blocking #futures
+An event-driven, non-blocking I/O platform for writing asynchronous I/O
+backed applications.
+version: 1.53.1
+license: MIT
+rust-version: 1.71
+documentation: https://docs.rs/tokio/1.53.1
+homepage: https://tokio.rs
+repository: https://github.com/tokio-rs/tokio
+crates.io: https://crates.io/crates/tokio/1.53.1
+features:
+ +default              = []
+  bytes                = [dep:bytes]
+  fs                   = []
+  full                 = [fs, io-util, io-std, macros, net, parking_lot, process, rt, rt-multi-thread, signal, sync, time]
+  io-std               = []
+  io-uring             = [dep:io-uring, libc, mio/os-poll, mio/os-ext, dep:slab]
+  io-util              = [bytes]
+  libc                 = [dep:libc]
+  macros               = [tokio-macros]
+  mio                  = [dep:mio]
+  net                  = [libc, mio/os-poll, mio/os-ext, mio/net, socket2, windows-sys/Win32_Foundation, windows-sys/Win32_Security, windows-sys/Win32_Storage_FileSystem, windows-sys/Win32_System_Pipes, windows-sys/Win32_System_SystemServices]
+  parking_lot          = [dep:parking_lot]
+  process              = [bytes, libc, mio/os-poll, mio/os-ext, mio/net, signal-hook-registry, windows-sys/Win32_Foundation, windows-sys/Win32_System_Threading, windows-sys/Win32_System_WindowsProgramming]
+  rt                   = []
+  rt-multi-thread      = [rt]
+  schedule-latency     = []
+  signal               = [libc, mio/os-poll, mio/net, mio/os-ext, signal-hook-registry, windows-sys/Win32_Foundation, windows-sys/Win32_System_Console]
+  signal-hook-registry = [dep:signal-hook-registry]
+  socket2              = [dep:socket2]
+  sync                 = []
+  taskdump             = [dep:backtrace]
+  test-util            = [rt, sync, time]
+  time                 = []
+  tokio-macros         = [dep:tokio-macros]
+  tracing              = [dep:tracing]
+  windows-sys          = [dep:windows-sys]
+
+=== sqlx ===
+    Updating crates.io index
+    Updating crates.io index
+sqlx
+🧰 The Rust SQL Toolkit. An async, pure Rust SQL crate featuring compile-time checked queries without a DSL. Supports PostgreSQL, MySQL, and SQLite.
+version: 0.9.0
+license: MIT OR Apache-2.0
+rust-version: 1.94.0
+documentation: https://docs.rs/sqlx
+repository: https://github.com/launchbadge/sqlx
+crates.io: https://crates.io/crates/sqlx/0.9.0
+features:
+ +default                       = [any, macros, migrate, json]
+  any                           = [sqlx-core/any, sqlx-mysql?/any, sqlx-postgres?/any, sqlx-sqlite?/any]
+  derive                        = [sqlx-macros/derive]
+  json                          = [sqlx-core/json, sqlx-macros?/json, sqlx-mysql?/json, sqlx-postgres?/json, sqlx-sqlite?/json]
+  macros                        = [derive, sqlx-macros/macros, sqlx-core/offline, sqlx-mysql?/offline, sqlx-postgres?/offline, sqlx-sqlite?/offline]
+  migrate                       = [sqlx-core/migrate, sqlx-macros?/migrate, sqlx-mysql?/migrate, sqlx-postgres?/migrate, sqlx-sqlite?/migrate]
+  45 deactivated features
+
+=== axum ===
+    Updating crates.io index
+    Updating crates.io index
+axum #http #web #routing
+HTTP routing and request handling library that focuses on ergonomics and modularity
+version: 0.8.9
+license: MIT
+rust-version: 1.80
+documentation: https://docs.rs/axum/0.8.9
+homepage: https://github.com/tokio-rs/axum
+repository: https://github.com/tokio-rs/axum
+crates.io: https://crates.io/crates/axum/0.8.9
+features:
+ +default        = [form, http1, json, matched-path, original-uri, query, tokio, tower-log, tracing]
+  form           = [dep:form_urlencoded, dep:serde_urlencoded, dep:serde_path_to_error]
+  http1          = [dep:hyper, hyper?/http1, hyper-util?/http1]
+  json           = [dep:serde_json, dep:serde_path_to_error]
+  matched-path   = []
+  original-uri   = []
+  query          = [dep:form_urlencoded, dep:serde_urlencoded, dep:serde_path_to_error]
+  tokio          = [dep:hyper-util, dep:tokio, tokio/net, tokio/rt, tower/make, tokio/macros]
+  tower-log      = [tower/log]
+  tracing        = [dep:tracing, axum-core/tracing]
+  __private      = [tokio, http1, dep:reqwest]
+  __private_docs = [axum-core/__private_docs, tower/full, dep:serde, dep:tower-http]
+  http2          = [dep:hyper, hyper?/http2, hyper-util?/http2]
+  macros         = [dep:axum-macros]
+  multipart      = [dep:multer]
+  ws             = [dep:hyper, tokio, dep:tokio-tungstenite, dep:sha1, dep:base64]
+
+=== tower ===
+    Updating crates.io index
+    Updating crates.io index
+tower #io #async #non-blocking #futures #service
+Tower is a library of modular and reusable components for building robust
+clients and servers.
+version: 0.5.3
+license: MIT
+rust-version: 1.64.0
+documentation: https://docs.rs/tower/0.5.3
+homepage: https://github.com/tower-rs/tower
+repository: https://github.com/tower-rs/tower
+crates.io: https://crates.io/crates/tower/0.5.3
+features:
+  balance          = [discover, load, ready-cache, make, slab, util]
+  buffer           = [tokio/sync, tokio/rt, tokio-util, tracing, pin-project-lite]
+  discover         = [futures-core, pin-project-lite]
+  filter           = [futures-util, pin-project-lite]
+  full             = [balance, buffer, discover, filter, hedge, limit, load, load-shed, make, ready-cache, reconnect, retry, spawn-ready, steer, timeout, util]
+  futures-core     = [dep:futures-core]
+  futures-util     = [dep:futures-util]
+  hdrhistogram     = [dep:hdrhistogram]
+  hedge            = [util, filter, futures-util, hdrhistogram, tokio/time, tracing]
+  indexmap         = [dep:indexmap]
+  limit            = [tokio/time, tokio/sync, tokio-util, tracing, pin-project-lite]
+  load             = [tokio/time, tracing, pin-project-lite]
+  load-shed        = [pin-project-lite]
+  log              = [tracing/log]
+  make             = [pin-project-lite, tokio]
+  pin-project-lite = [dep:pin-project-lite]
+  ready-cache      = [futures-core, futures-util, indexmap, tokio/sync, tracing, pin-project-lite]
+  reconnect        = [make, tracing]
+  retry            = [tokio/time, util]
+  slab             = [dep:slab]
+  spawn-ready      = [futures-util, tokio/sync, tokio/rt, util, tracing]
+  steer            = []
+  sync_wrapper     = [dep:sync_wrapper]
+  timeout          = [pin-project-lite, tokio/time]
+  tokio            = [dep:tokio]
+  tokio-stream     = []
+  tokio-util       = [dep:tokio-util]
+  tracing          = [dep:tracing]
+  util             = [futures-core, futures-util, pin-project-lite, sync_wrapper]
+
+=== tower-http ===
+    Updating crates.io index
+    Updating crates.io index
+tower-http #io #async #futures #service #http
+Tower middleware and utilities for HTTP clients and servers
+version: 0.7.1
+license: MIT
+rust-version: 1.65
+documentation: https://docs.rs/tower-http/0.7.1
+homepage: https://github.com/tower-rs/tower-http
+repository: https://github.com/tower-rs/tower-http
+crates.io: https://crates.io/crates/tower-http/0.7.1
+features:
+ +default               = []
+  44 deactivated features
+
+=== argon2 ===
+    Updating crates.io index
+    Updating crates.io index
+argon2 #crypto #hashing #password #phf
+Pure Rust implementation of the Argon2 password hashing function with support
+for the Argon2d, Argon2i, and Argon2id algorithmic variants
+version: 0.6.0
+license: MIT OR Apache-2.0
+rust-version: 1.85
+documentation: https://docs.rs/argon2
+homepage: https://github.com/RustCrypto/password-hashes/tree/master/argon2
+repository: https://github.com/RustCrypto/password-hashes
+crates.io: https://crates.io/crates/argon2/0.6.0
+features:
+ +default       = [alloc, getrandom, password-hash]
+  alloc         = [password-hash?/alloc]
+  getrandom     = [password-hash/getrandom]
+  password-hash = [dep:password-hash]
+  kdf           = [alloc, dep:kdf]
+  parallel      = [dep:rayon]
+  rand_core     = [password-hash/rand_core]
+  zeroize       = [dep:zeroize]
+
+=== jsonwebtoken ===
+    Updating crates.io index
+    Updating crates.io index
+jsonwebtoken #jwt #api #token #jwk
+Create and decode JWTs in a strongly typed way.
+version: 11.1.0
+license: MIT
+rust-version: 1.88.0
+documentation: https://docs.rs/jsonwebtoken/11.1.0
+homepage: https://github.com/Keats/jsonwebtoken
+repository: https://github.com/Keats/jsonwebtoken
+crates.io: https://crates.io/crates/jsonwebtoken/11.1.0
+features:
+ +default     = [use_pem]
+  use_pem     = [dep:pem, dep:simple_asn1]
+  aws_lc_rs   = [dep:aws-lc-rs]
+  rust_crypto = [dep:ed25519-dalek, dep:hmac, dep:p256, dep:p384, dep:rand, dep:rsa, dep:sha2]
+
+=== sha2 ===
+    Updating crates.io index
+    Updating crates.io index
+sha2 #sha2 #hash #digest
+Pure Rust implementation of the SHA-2 hash function family
+including SHA-224, SHA-256, SHA-384, and SHA-512.
+version: 0.11.0
+license: MIT OR Apache-2.0
+rust-version: 1.85
+documentation: https://docs.rs/sha2
+repository: https://github.com/RustCrypto/hashes
+crates.io: https://crates.io/crates/sha2/0.11.0
+features:
+ +default = [alloc, oid]
+  alloc   = [digest/alloc]
+  oid     = [digest/oid]
+  zeroize = [digest/zeroize]
+
+=== base64 ===
+    Updating crates.io index
+    Updating crates.io index
+base64 #base64 #utf8 #encode #decode #no_std
+encodes and decodes base64 as bytes or utf8
+version: 0.23.1
+license: MIT OR Apache-2.0
+rust-version: 1.71.0
+documentation: https://docs.rs/base64
+repository: https://github.com/marshallpierce/rust-base64
+crates.io: https://crates.io/crates/base64/0.23.1
+features:
+ +default     = [std, simd-unsafe]
+  alloc       = []
+  simd-unsafe = []
+  std         = [alloc]
+
+=== subtle ===
+    Updating crates.io index
+    Updating crates.io index
+subtle #cryptography #crypto #constant-time #utilities
+Pure-Rust traits and utilities for constant-time cryptographic implementations.
+version: 2.6.1
+license: BSD-3-Clause
+rust-version: unknown
+documentation: https://docs.rs/subtle
+homepage: https://dalek.rs/
+repository: https://github.com/dalek-cryptography/subtle
+crates.io: https://crates.io/crates/subtle/2.6.1
+features:
+ +default             = [std, i128]
+  i128                = []
+  std                 = []
+  const-generics      = []
+  core_hint_black_box = []
+  nightly             = []
+
+=== getrandom ===
+    Updating crates.io index
+    Updating crates.io index
+getrandom
+A small cross-platform library for retrieving random data from system source
+version: 0.4.3
+license: MIT OR Apache-2.0
+rust-version: 1.85
+documentation: https://docs.rs/getrandom
+repository: https://github.com/rust-random/getrandom
+crates.io: https://crates.io/crates/getrandom/0.4.3
+features:
+  std     = []
+  sys_rng = [dep:rand_core]
+  wasm_js = [dep:wasm-bindgen, dep:js-sys]
+
+=== tracing-subscriber ===
+    Updating crates.io index
+    Updating crates.io index
+tracing-subscriber #logging #tracing #metrics #subscriber
+Utilities for implementing and composing `tracing` subscribers.
+version: 0.3.23
+license: MIT
+rust-version: 1.65.0
+documentation: https://docs.rs/tracing-subscriber/0.3.23
+homepage: https://tokio.rs
+repository: https://github.com/tokio-rs/tracing
+crates.io: https://crates.io/crates/tracing-subscriber/0.3.23
+features:
+ +default        = [smallvec, fmt, ansi, tracing-log, std]
+  alloc          = []
+  ansi           = [fmt, nu-ansi-term]
+  fmt            = [registry, std]
+  nu-ansi-term   = [dep:nu-ansi-term]
+  registry       = [sharded-slab, thread_local, std]
+  sharded-slab   = [dep:sharded-slab]
+  smallvec       = [dep:smallvec]
+  std            = [alloc, tracing-core/std]
+  thread_local   = [dep:thread_local]
+  tracing-log    = [dep:tracing-log]
+  chrono         = [dep:chrono]
+  env-filter     = [matchers, once_cell, tracing, std, thread_local, dep:regex-automata]
+  json           = [tracing-serde, serde, serde_json]
+  local-time     = [time/local-offset]
+  matchers       = [dep:matchers]
+  once_cell      = [dep:once_cell]
+  parking_lot    = [dep:parking_lot]
+  regex          = []
+  serde          = [dep:serde]
+  serde_json     = [dep:serde_json]
+  time           = [dep:time]
+  tracing        = [dep:tracing]
+  tracing-serde  = [dep:tracing-serde]
+  valuable       = [tracing-core/valuable, valuable_crate, valuable-serde, tracing-serde/valuable]
+  valuable-serde = [dep:valuable-serde]
+  valuable_crate = [dep:valuable_crate]
+
+=== opentelemetry ===
+    Updating crates.io index
+    Updating crates.io index
+opentelemetry #opentelemetry #logging #tracing #metrics
+OpenTelemetry API for Rust
+version: 0.33.0
+license: Apache-2.0
+rust-version: 1.75.0
+documentation: https://docs.rs/opentelemetry/0.33.0
+homepage: https://github.com/open-telemetry/opentelemetry-rust/tree/main/opentelemetry
+repository: https://github.com/open-telemetry/opentelemetry-rust/tree/main/opentelemetry
+crates.io: https://crates.io/crates/opentelemetry/0.33.0
+features:
+ +default                                = [trace, metrics, logs, internal-logs, futures]
+  futures                                = [futures-core, futures-sink, pin-project-lite]
+  futures-core                           = [dep:futures-core]
+  futures-sink                           = [dep:futures-sink]
+  internal-logs                          = [tracing]
+  logs                                   = []
+  metrics                                = []
+  pin-project-lite                       = [dep:pin-project-lite]
+  thiserror                              = [dep:thiserror]
+  trace                                  = [futures, thiserror]
+  tracing                                = [dep:tracing]
+  experimental_context_observer          = []
+  experimental_metrics_bound_instruments = [metrics]
+  testing                                = [trace]
+
+=== opentelemetry_sdk ===
+    Updating crates.io index
+    Updating crates.io index
+opentelemetry_sdk
+The SDK for the OpenTelemetry metrics collection and distributed tracing framework
+version: 0.33.0
+license: Apache-2.0
+rust-version: 1.75.0
+documentation: https://docs.rs/opentelemetry_sdk/0.33.0
+homepage: https://github.com/open-telemetry/opentelemetry-rust/tree/main/opentelemetry-sdk
+repository: https://github.com/open-telemetry/opentelemetry-rust/tree/main/opentelemetry-sdk
+crates.io: https://crates.io/crates/opentelemetry_sdk/0.33.0
+features:
+ +default                                                    = [trace, metrics, logs, internal-logs]
+  internal-logs                                              = [opentelemetry/internal-logs]
+  logs                                                       = [opentelemetry/logs, dep:futures-channel, dep:futures-executor, dep:futures-util]
+  metrics                                                    = [opentelemetry/metrics, dep:futures-channel, dep:futures-executor, dep:futures-util, dep:thiserror]
+  percent-encoding                                           = [dep:percent-encoding]
+  rand                                                       = [dep:rand]
+  trace                                                      = [opentelemetry/trace, rand, percent-encoding, dep:futures-channel, dep:futures-executor, dep:futures-util, dep:thiserror]
+  bench_profiling                                            = []
+  experimental_async_runtime                                 = [dep:futures-channel, dep:futures-executor, dep:futures-util, dep:thiserror]
+  experimental_logs_batch_log_processor_with_async_runtime   = [logs, experimental_async_runtime]
+  experimental_metrics_bound_instruments                     = [metrics, opentelemetry/experimental_metrics_bound_instruments]
+  experimental_metrics_custom_reader                         = [metrics]
+  experimental_metrics_disable_name_validation               = [metrics]
+  experimental_metrics_periodicreader_with_async_runtime     = [metrics, experimental_async_runtime]
+  experimental_trace_batch_span_processor_with_async_runtime = [tokio/sync, trace, experimental_async_runtime]
+  http                                                       = [dep:http]
+  jaeger_remote_sampler                                      = [trace, opentelemetry-http, http, serde, serde_json, url, experimental_async_runtime]
+  opentelemetry-http                                         = [dep:opentelemetry-http]
+  rt-tokio                                                   = [tokio/rt, tokio/time, tokio-stream, experimental_async_runtime]
+  rt-tokio-current-thread                                    = [tokio/rt, tokio/time, tokio-stream, experimental_async_runtime]
+  serde                                                      = [dep:serde]
+  serde_json                                                 = [dep:serde_json]
+  spec_unstable_metrics_views                                = [metrics]
+  testing                                                    = [opentelemetry/testing, trace, metrics, logs, tokio/sync]
+  tokio                                                      = [dep:tokio]
+  tokio-stream                                               = [dep:tokio-stream]
+  url                                                        = [dep:url]
+
+=== opentelemetry-otlp ===
+    Updating crates.io index
+    Updating crates.io index
+opentelemetry-otlp #opentelemetry #otlp #logging #tracing #metrics
+Exporter for the OpenTelemetry Collector
+version: 0.33.0
+license: Apache-2.0
+rust-version: 1.75.0
+documentation: https://docs.rs/opentelemetry-otlp/0.33.0
+homepage: https://github.com/open-telemetry/opentelemetry-rust/tree/main/opentelemetry-otlp
+repository: https://github.com/open-telemetry/opentelemetry-rust/tree/main/opentelemetry-otlp
+crates.io: https://crates.io/crates/opentelemetry-otlp/0.33.0
+features:
+ +default                 = [http-proto, reqwest-blocking-client, trace, metrics, logs, internal-logs]
+  http                    = [dep:http]
+  http-proto              = [prost, opentelemetry-http, opentelemetry-proto/gen-tonic-messages, http, httpdate, trace, metrics]
+  httpdate                = [dep:httpdate]
+  internal-logs           = [opentelemetry_sdk/internal-logs, opentelemetry/internal-logs]
+  logs                    = [opentelemetry/logs, opentelemetry_sdk/logs, opentelemetry-proto/logs]
+  metrics                 = [opentelemetry/metrics, opentelemetry_sdk/metrics, opentelemetry-proto/metrics]
+  opentelemetry-http      = [dep:opentelemetry-http]
+  prost                   = [dep:prost]
+  reqwest-blocking-client = [reqwest/blocking, opentelemetry-http/reqwest-blocking]
+  trace                   = [opentelemetry/trace, opentelemetry_sdk/trace, opentelemetry-proto/trace]
+  22 deactivated features
+
+=== opentelemetry-http ===
+    Updating crates.io index
+    Updating crates.io index
+opentelemetry-http #opentelemetry #tracing #context #propagation
+Helper implementations for sending HTTP requests. Uses include propagating and extracting context over http, exporting telemetry, requesting sampling strategies.
+version: 0.33.0
+license: Apache-2.0
+rust-version: 1.75.0
+documentation: https://docs.rs/opentelemetry-http/0.33.0
+homepage: https://github.com/open-telemetry/opentelemetry-rust/tree/main/opentelemetry-http
+repository: https://github.com/open-telemetry/opentelemetry-rust/tree/main/opentelemetry-http
+crates.io: https://crates.io/crates/opentelemetry-http/0.33.0
+features:
+ +default          = [internal-logs]
+  internal-logs    = [opentelemetry/internal-logs]
+  hyper            = [dep:http-body-util, dep:hyper, dep:hyper-util, dep:tokio]
+  reqwest          = [dep:reqwest]
+  reqwest-blocking = [dep:reqwest, reqwest/blocking]
+  reqwest-rustls   = [dep:reqwest, reqwest/rustls]
+
+=== tracing-opentelemetry ===
+    Updating crates.io index
+    Updating crates.io index
+tracing-opentelemetry #tracing #opentelemetry #jaeger #zipkin #async
+OpenTelemetry integration for tracing
+version: 0.33.0
+license: MIT
+rust-version: 1.75.0
+documentation: https://docs.rs/tracing-opentelemetry/0.33.0
+homepage: https://github.com/tokio-rs/tracing-opentelemetry
+repository: https://github.com/tokio-rs/tracing-opentelemetry
+crates.io: https://crates.io/crates/tracing-opentelemetry/0.33.0
+features:
+ +default     = [tracing-log, metrics]
+  metrics     = [opentelemetry/metrics, smallvec]
+  smallvec    = [dep:smallvec]
+  tracing-log = [dep:tracing-log]
+  lazy_static = [dep:lazy_static]
+
+=== config ===
+    Blocking waiting for file lock on package cache
+    Updating crates.io index
+    Updating crates.io index
+config #config #configuration #settings #env #environment
+Layered configuration system for Rust applications.
+version: 0.15.25
+license: MIT OR Apache-2.0
+rust-version: 1.85.0
+documentation: https://docs.rs/config/0.15.25
+repository: https://github.com/rust-cli/config-rs
+crates.io: https://crates.io/crates/config/0.15.25
+features:
+ +default        = [toml, json, yaml, ini, ron, json5, convert-case, async]
+  async          = [async-trait]
+  async-trait    = [dep:async-trait]
+  convert-case   = [convert_case]
+  convert_case   = [dep:convert_case]
+  ini            = [rust-ini]
+  json           = [serde_json]
+  json5          = [dep:json5, dep:serde-untagged]
+  ron            = [dep:ron]
+  rust-ini       = [dep:rust-ini]
+  serde_json     = [dep:serde_json]
+  toml           = [dep:toml]
+  yaml           = [yaml-rust2]
+  yaml-rust2     = [dep:yaml-rust2]
+  corn           = [dep:corn]
+  indexmap       = [dep:indexmap]
+  preserve_order = [indexmap, toml?/preserve_order, serde_json?/preserve_order, ron?/indexmap]
+
+=== clap ===
+    Blocking waiting for file lock on package cache
+    Updating crates.io index
+    Updating crates.io index
+clap #argument #cli #arg #parser #parse
+A simple to use, efficient, and full-featured Command Line Argument Parser
+version: 4.6.7
+license: MIT OR Apache-2.0
+rust-version: 1.85
+documentation: https://docs.rs/clap/4.6.7
+repository: https://github.com/clap-rs/clap
+crates.io: https://crates.io/crates/clap/4.6.7
+features:
+ +default                  = [std, color, help, usage, error-context, suggestions]
+  color                    = [clap_builder/color]
+  error-context            = [clap_builder/error-context]
+  help                     = [clap_builder/help]
+  std                      = [clap_builder/std]
+  suggestions              = [clap_builder/suggestions]
+  usage                    = [clap_builder/usage]
+  cargo                    = [clap_builder/cargo]
+  debug                    = [clap_builder/debug, clap_derive?/debug]
+  deprecated               = [clap_builder/deprecated, clap_derive?/deprecated]
+  derive                   = [dep:clap_derive]
+  env                      = [clap_builder/env]
+  string                   = [clap_builder/string]
+  unicode                  = [clap_builder/unicode]
+  unstable-derive-ui-tests = []
+  unstable-doc             = [clap_builder/unstable-doc, derive]
+  unstable-ext             = [clap_builder/unstable-ext]
+  unstable-markdown        = [clap_derive/unstable-markdown]
+  unstable-styles          = [clap_builder/unstable-styles]
+  unstable-v5              = [clap_builder/unstable-v5, clap_derive?/unstable-v5, deprecated]
+  wrap_help                = [clap_builder/wrap_help]
+
+=== testcontainers ===
+    Updating crates.io index
+    Updating crates.io index
+testcontainers #docker #testcontainers #docker-compose
+A library for integration-testing against docker containers from within Rust.
+version: 0.28.0
+license: MIT OR Apache-2.0
+rust-version: 1.88
+documentation: https://docs.rs/testcontainers/0.28.0
+repository: https://github.com/testcontainers/testcontainers-rs
+crates.io: https://crates.io/crates/testcontainers/0.28.0
+features:
+ +default               = [ring]
+  ring                  = [bollard/ssl]
+  aws-lc-rs             = [bollard/aws-lc-rs]
+  blocking              = []
+  conquer-once          = [dep:conquer-once]
+  device-requests       = []
+  docker-compose        = [dep:docker-compose-types, dep:uuid]
+  host-port-exposure    = [dep:russh, russh/ring]
+  http_wait             = [http_wait_plain, reqwest/rustls]
+  http_wait_plain       = [reqwest]
+  properties-config     = [serde-java-properties]
+  reqwest               = [dep:reqwest]
+  reusable-containers   = []
+  serde-java-properties = [dep:serde-java-properties]
+  signal-hook           = [dep:signal-hook]
+  ssl                   = [bollard/ssl_providerless]
+  watchdog              = [signal-hook, conquer-once]
+
+=== testcontainers-modules ===
+    Blocking waiting for file lock on package cache
+    Updating crates.io index
+    Updating crates.io index
+testcontainers-modules #docker #testcontainers
+Community maintained modules for Testcontainers for Rust
+version: 0.15.0
+license: MIT
+rust-version: 1.88
+documentation: https://docs.rs/testcontainers-modules/0.15.0
+repository: https://github.com/testcontainers/testcontainers-rs-modules-community
+crates.io: https://crates.io/crates/testcontainers-modules/0.15.0
+features:
+ +default                    = [ring]
+  ring                       = [testcontainers/ring]
+  59 deactivated features
+

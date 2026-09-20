@@ -1,0 +1,21 @@
+[package]
+name = "auth-postgres"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+auth-core.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+tracing.workspace = true
+# имена фич сверь через `cargo info sqlx` — в 0.9 они могли поменяться
+sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "macros", "chrono"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+testcontainers-modules = { workspace = true, features = ["postgres"] }

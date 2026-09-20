@@ -1,0 +1,63 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[workspace.dependencies]
+# внутренние
+auth-core      = { path = "crates/auth-core" }
+auth-postgres  = { path = "crates/auth-postgres" }
+auth-api       = { path = "crates/auth-api" }
+auth-crypto    = { path = "crates/auth-crypto" }
+auth-telemetry = { path = "crates/auth-telemetry" }
+
+# общие
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+thiserror   = "2"
+anyhow      = "1"
+async-trait = "0.1"
+secrecy     = { version = "0.10", features = ["serde"] }
+chrono      = { version = "0.4", features = ["serde"] }
+tracing     = "0.1"
+tokio       = { version = "1.53", default-features = false }
+
+# postgres
+sqlx = { version = "0.9", default-features = false }
+
+# api
+axum       = "0.8"
+tower      = "0.5"
+tower-http = { version = "0.6", default-features = false }
+
+# crypto
+argon2       = "0.6"
+jsonwebtoken = { version = "11", default-features = false }
+sha2         = "0.11"
+base64       = "0.23"
+subtle       = "2"
+getrandom    = "0.4"
+
+# telemetry — семейство opentelemetry СТРОГО 0.32
+tracing-subscriber    = "0.3"
+opentelemetry         = "0.32"
+opentelemetry_sdk     = "0.32"
+opentelemetry-otlp    = { version = "0.32", default-features = false }
+opentelemetry-http    = "0.32"
+tracing-opentelemetry = "0.33"
+
+# server
+config = "0.15"
+clap   = { version = "4", features = ["derive"] }
+
+# dev
+testcontainers-modules = "0.15"
