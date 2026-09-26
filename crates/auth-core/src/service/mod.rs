@@ -2,6 +2,8 @@
 
 mod access;
 mod auth;
+mod roles;
+mod users;
 
 use std::sync::Arc;
 
@@ -12,6 +14,8 @@ use crate::ports::{
 
 pub use access::{AccessService, admin_permissions};
 pub use auth::{AuthContext, AuthPolicy, AuthService, LoginResult, TokenPair};
+pub use roles::{AssignRole, CreateRole, RoleService, UpdateRole};
+pub use users::{CreateUser, UpdateUser, UserService, UserWithRoles};
 
 /// Все порты разом. Собирается один раз в composition root (auth-server)
 /// и раздаётся сервисам через `Service::from_ports(&ports, ..)`.

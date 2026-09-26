@@ -211,13 +211,15 @@ impl UserRepository for MemUsers {
 
     async fn update(&self, id: UserId, upd: &UserUpdate) -> Result<User> {
         let mut rows = self.rows.lock().unwrap();
+        // сначала существование (как WHERE id = $N в реальной БД), потом конфликт email —
+        // иначе чужой email, случайно совпавший с переданным, маскирует NotFound
+        if !rows.iter().any(|(u, _)| u.id == id) {
+            return Err(AuthError::NotFound);
+        }
         if rows.iter().any(|(u, _)| u.id != id && u.email == upd.email) {
             return Err(AuthError::Conflict);
         }
-        let (user, _) = rows
-            .iter_mut()
-            .find(|(u, _)| u.id == id)
-            .ok_or(AuthError::NotFound)?;
+        let (user, _) = rows.iter_mut().find(|(u, _)| u.id == id).unwrap();
         user.email = upd.email.clone();
         user.first_name = upd.first_name.clone();
         user.second_name = upd.second_name.clone();
@@ -449,5 +451,215 @@ impl Harness {
             auth,
             access,
         }
+    }
+}
+
+// ---------- назначения ролей ----------
+
+use std::collections::HashMap;
+
+#[derive(Default)]
+pub struct MemAssignments {
+    rows: Mutex<Vec<(UserId, RoleAssignment)>>,
+}
+
+impl MemAssignments {
+    /// Быстро выдаёт пользователю роль (подготовка тестов).
+    pub fn seed(&self, user: UserId, role_code: &str, scope: Option<&str>) {
+        let mut rows = self.rows.lock().unwrap();
+        let role = Role {
+            id: RoleId(rows.len() as i64 + 1),
+            code: RoleCode::parse(role_code).unwrap(),
+            name: role_code.to_owned(),
+            scope: if scope.is_some() {
+                RoleScope::Scoped
+            } else {
+                RoleScope::Global
+            },
+        };
+        rows.push((
+            user,
+            RoleAssignment {
+                role,
+                scope: scope.map(|s| ScopeId::parse(s).unwrap()),
+            },
+        ));
+    }
+}
+
+#[async_trait]
+impl AssignmentRepository for MemAssignments {
+    async fn for_users(&self, users: &[UserId]) -> Result<HashMap<UserId, Vec<RoleAssignment>>> {
+        let rows = self.rows.lock().unwrap();
+        let mut map: HashMap<UserId, Vec<RoleAssignment>> = HashMap::new();
+        for (user, assignment) in rows.iter().filter(|(u, _)| users.contains(u)) {
+            map.entry(*user).or_default().push(assignment.clone());
+        }
+        Ok(map)
+    }
+
+    async fn assign(&self, user: UserId, role: RoleId, scope: Option<&ScopeId>) -> Result<()> {
+        let mut rows = self.rows.lock().unwrap();
+        if rows
+            .iter()
+            .any(|(u, a)| *u == user && a.role.id == role && a.scope.as_ref() == scope)
+        {
+            return Err(AuthError::Conflict);
+        }
+        let code = format!("role-{}", role.0);
+        rows.push((
+            user,
+            RoleAssignment {
+                role: Role {
+                    id: role,
+                    code: RoleCode::parse(&code).unwrap(),
+                    name: code,
+                    scope: if scope.is_some() {
+                        RoleScope::Scoped
+                    } else {
+                        RoleScope::Global
+                    },
+                },
+                scope: scope.cloned(),
+            },
+        ));
+        Ok(())
+    }
+
+    async fn unassign(&self, user: UserId, role: RoleId, scope: Option<&ScopeId>) -> Result<()> {
+        let mut rows = self.rows.lock().unwrap();
+        rows.retain(|(u, a)| !(*u == user && a.role.id == role && a.scope.as_ref() == scope));
+        Ok(())
+    }
+
+    async fn revoke_all_in_scope(&self, scope: &ScopeId) -> Result<u64> {
+        let mut rows = self.rows.lock().unwrap();
+        let before = rows.len();
+        rows.retain(|(_, a)| a.scope.as_ref() != Some(scope));
+        Ok((before - rows.len()) as u64)
+    }
+}
+
+// ---------- роли ----------
+
+#[derive(Default)]
+pub struct MemRoles {
+    rows: Mutex<Vec<Role>>,
+    role_permissions: Mutex<Vec<(RoleId, Permission)>>,
+    next_role_id: AtomicI64,
+    next_perm_id: AtomicI64,
+}
+
+#[async_trait]
+impl RoleRepository for MemRoles {
+    async fn find_by_id(&self, id: RoleId) -> Result<Option<Role>> {
+        Ok(self
+            .rows
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|r| r.id == id)
+            .cloned())
+    }
+
+    async fn list(&self, req: &PageRequest) -> Result<Page<Role>> {
+        let rows = self.rows.lock().unwrap();
+        let needle = req.search.as_deref().map(str::to_lowercase);
+        let matched: Vec<Role> = rows
+            .iter()
+            .filter(|r| match &needle {
+                None => true,
+                Some(n) => {
+                    r.code.as_str().contains(n.as_str())
+                        || r.name.to_lowercase().contains(n.as_str())
+                }
+            })
+            .cloned()
+            .collect();
+        let total = matched.len() as i64;
+        let items = matched
+            .into_iter()
+            .skip(req.offset() as usize)
+            .take(req.per_page as usize)
+            .collect();
+        Ok(Page::new(items, req, total))
+    }
+
+    async fn create(&self, new: &NewRole) -> Result<Role> {
+        let mut rows = self.rows.lock().unwrap();
+        if rows.iter().any(|r| r.code == new.code) {
+            return Err(AuthError::Conflict);
+        }
+        let id = RoleId(self.next_role_id.fetch_add(1, Ordering::SeqCst) + 1);
+        let role = Role {
+            id,
+            code: new.code.clone(),
+            name: new.name.clone(),
+            scope: new.scope,
+        };
+        rows.push(role.clone());
+        Ok(role)
+    }
+
+    async fn update(&self, id: RoleId, upd: &RoleUpdate) -> Result<Role> {
+        let mut rows = self.rows.lock().unwrap();
+        if rows.iter().any(|r| r.id != id && r.code == upd.code) {
+            return Err(AuthError::Conflict);
+        }
+        let role = rows
+            .iter_mut()
+            .find(|r| r.id == id)
+            .ok_or(AuthError::NotFound)?;
+        role.code = upd.code.clone();
+        role.name = upd.name.clone();
+        Ok(role.clone())
+    }
+
+    async fn delete(&self, id: RoleId) -> Result<()> {
+        let mut rows = self.rows.lock().unwrap();
+        let before = rows.len();
+        rows.retain(|r| r.id != id);
+        if rows.len() == before {
+            return Err(AuthError::NotFound);
+        }
+        self.role_permissions
+            .lock()
+            .unwrap()
+            .retain(|(r, _)| *r != id);
+        Ok(())
+    }
+
+    async fn permissions_of(&self, role: RoleId) -> Result<Vec<Permission>> {
+        Ok(self
+            .role_permissions
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(r, _)| *r == role)
+            .map(|(_, p)| p.clone())
+            .collect())
+    }
+
+    async fn set_permissions(
+        &self,
+        role: RoleId,
+        permission_ids: &[PermissionId],
+    ) -> Result<Vec<Permission>> {
+        // упрощённая заглушка: считаем описание неизвестным; в auth-postgres
+        // это реальный join с таблицей permissions
+        let mut rp = self.role_permissions.lock().unwrap();
+        rp.retain(|(r, _)| *r != role);
+        let mut result = Vec::new();
+        for id in permission_ids {
+            let perm = Permission {
+                id: *id,
+                code: PermissionCode::parse(&format!("perm-{}", id.0)).unwrap(),
+                description: String::new(),
+            };
+            rp.push((role, perm.clone()));
+            result.push(perm);
+        }
+        let _ = self.next_perm_id.load(Ordering::SeqCst); // зарезервировано на будущее
+        Ok(result)
     }
 }

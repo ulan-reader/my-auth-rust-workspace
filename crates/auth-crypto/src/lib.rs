@@ -1,14 +1,12 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! auth-crypto — реализации портов auth-core: Argon2id-хеширование паролей,
+//! HS256-JWT для access-токенов, криптостойкие refresh-токены.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub mod config;
+pub mod jwt;
+pub mod password;
+pub mod refresh;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use config::CryptoConfig;
+pub use jwt::JwtCodec;
+pub use password::Argon2PasswordHasher;
+pub use refresh::Sha256RefreshTokenProvider;

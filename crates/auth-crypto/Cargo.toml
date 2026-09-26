@@ -13,7 +13,7 @@ secrecy.workspace = true
 serde.workspace = true
 chrono.workspace = true
 tracing.workspace = true
-tokio = { workspace = true, features = ["rt"] }
+tokio = { workspace = true, features = ["rt", "macros"] }
 argon2.workspace = true
 # нужен crypto-backend (rust_crypto или aws_lc_rs) — см. `cargo info jsonwebtoken`
 jsonwebtoken = { workspace = true, features = ["rust_crypto"] }
