@@ -1,14 +1,16 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! auth-postgres — адаптер хранения: реализации портов auth-core на sqlx/Postgres.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+mod assignments;
+mod error;
+mod permissions;
+mod pool;
+mod roles;
+mod sessions;
+mod users;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use assignments::PgAssignmentRepository;
+pub use permissions::PgPermissionRepository;
+pub use pool::{PostgresConfig, connect, migrate};
+pub use roles::PgRoleRepository;
+pub use sessions::PgSessionRepository;
+pub use users::PgUserRepository;
