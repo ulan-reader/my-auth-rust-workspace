@@ -19,6 +19,7 @@ pub mod admin_permissions {
     pub const ROLES_MANAGE: &str = "roles.manage";
     pub const ROLES_ASSIGN: &str = "roles.assign";
     pub const PERMISSIONS_VIEW: &str = "permissions.view";
+    pub const SETTINGS_MANAGE: &str = "settings.manage";
 }
 
 #[derive(Clone)]

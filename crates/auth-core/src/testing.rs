@@ -438,8 +438,10 @@ impl Harness {
             Arc::new(FakeCodec),
             Arc::new(FakeRefresh::default()),
             clock.clone(),
+            MemSettings::new(false),
             AuthPolicy::default(),
         );
+
         let access = AccessService::new(permissions.clone());
 
         Self {
@@ -661,5 +663,31 @@ impl RoleRepository for MemRoles {
         }
         let _ = self.next_perm_id.load(Ordering::SeqCst); // зарезервировано на будущее
         Ok(result)
+    }
+}
+
+// ---------- настройки ----------
+
+pub struct MemSettings(std::sync::atomic::AtomicBool);
+
+impl MemSettings {
+    pub fn new(allow_self_registration: bool) -> Arc<Self> {
+        Arc::new(Self(std::sync::atomic::AtomicBool::new(
+            allow_self_registration,
+        )))
+    }
+}
+
+#[async_trait]
+impl SettingsRepository for MemSettings {
+    async fn get(&self) -> Result<RuntimeSettings> {
+        Ok(RuntimeSettings {
+            allow_self_registration: self.0.load(Ordering::SeqCst),
+        })
+    }
+
+    async fn set_allow_self_registration(&self, allowed: bool) -> Result<()> {
+        self.0.store(allowed, Ordering::SeqCst);
+        Ok(())
     }
 }

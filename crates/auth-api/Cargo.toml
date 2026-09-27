@@ -17,4 +17,5 @@ tracing.workspace = true
 chrono.workspace = true
 opentelemetry.workspace = true
 opentelemetry-http.workspace = true
+secrecy.workspace = true
 tracing-opentelemetry.workspace = true

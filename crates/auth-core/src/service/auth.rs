@@ -12,7 +12,7 @@ use crate::{
     domain::*,
     ports::{
         AccessTokenCodec, Clock, NewSession, PasswordHasher, RefreshTokenProvider,
-        SessionRepository, UserRepository,
+        SessionRepository, SettingsRepository, UserRepository,
     },
 };
 
@@ -63,6 +63,40 @@ pub struct TokenPair {
     pub refresh_expires_at: DateTime<Utc>,
 }
 
+const MIN_PASSWORD_CHARS: usize = 8;
+const MAX_PASSWORD_CHARS: usize = 128;
+const MAX_NAME_CHARS: usize = 100;
+
+fn validate_password(password: &SecretString) -> Result<()> {
+    use secrecy::ExposeSecret;
+    let len = password.expose_secret().chars().count();
+    if (MIN_PASSWORD_CHARS..=MAX_PASSWORD_CHARS).contains(&len) {
+        Ok(())
+    } else {
+        Err(AuthError::validation(format!(
+            "пароль: от {MIN_PASSWORD_CHARS} до {MAX_PASSWORD_CHARS} символов"
+        )))
+    }
+}
+
+fn clean_name(raw: &str, field: &str) -> Result<String> {
+    let name = raw.trim();
+    if name.chars().count() > MAX_NAME_CHARS {
+        return Err(AuthError::validation(format!(
+            "{field}: не длиннее {MAX_NAME_CHARS} символов"
+        )));
+    }
+    Ok(name.to_owned())
+}
+
+#[derive(Debug)]
+pub struct RegisterInput {
+    pub email: String,
+    pub password: SecretString,
+    pub first_name: String,
+    pub second_name: String,
+}
+
 #[derive(Debug)]
 pub struct LoginResult {
     pub user: User,
@@ -90,10 +124,12 @@ pub struct AuthService {
     access_tokens: Arc<dyn AccessTokenCodec>,
     refresh_tokens: Arc<dyn RefreshTokenProvider>,
     clock: Arc<dyn Clock>,
+    settings: Arc<dyn SettingsRepository>,
     policy: AuthPolicy,
 }
 
 impl AuthService {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         users: Arc<dyn UserRepository>,
         sessions: Arc<dyn SessionRepository>,
@@ -101,6 +137,7 @@ impl AuthService {
         access_tokens: Arc<dyn AccessTokenCodec>,
         refresh_tokens: Arc<dyn RefreshTokenProvider>,
         clock: Arc<dyn Clock>,
+        settings: Arc<dyn SettingsRepository>,
         policy: AuthPolicy,
     ) -> Self {
         Self {
@@ -110,6 +147,7 @@ impl AuthService {
             access_tokens,
             refresh_tokens,
             clock,
+            settings,
             policy,
         }
     }
@@ -122,6 +160,7 @@ impl AuthService {
             ports.access_tokens.clone(),
             ports.refresh_tokens.clone(),
             ports.clock.clone(),
+            ports.settings.clone(),
             policy,
         )
     }
@@ -281,6 +320,28 @@ impl AuthService {
             user,
             session_id: session.id,
         })
+    }
+
+    /// Самостоятельная регистрация. Выключена по умолчанию (`AuthPolicy`) — политику
+    /// проверяем здесь, а не только на уровне HTTP, чтобы правило действовало и при
+    /// прямом вызове core как библиотеки.
+    #[instrument(skip_all, err(level = Level::WARN))]
+    pub async fn register(&self, input: RegisterInput) -> Result<LoginResult> {
+        if !self.settings.get().await?.allow_self_registration {
+            return Err(AuthError::Forbidden);
+        }
+
+        let email = Email::parse(&input.email)?;
+        validate_password(&input.password)?;
+        let new = crate::ports::NewUser {
+            email,
+            password_hash: self.hasher.hash(&input.password).await?,
+            first_name: clean_name(&input.first_name, "имя")?,
+            second_name: clean_name(&input.second_name, "фамилия")?,
+        };
+        let user = self.users.create(&new).await?;
+        let tokens = self.start_session(user.id).await?;
+        Ok(LoginResult { user, tokens })
     }
 
     async fn start_session(&self, user_id: UserId) -> Result<TokenPair> {
@@ -571,5 +632,66 @@ mod tests {
         assert!(AuthPolicy::new(minutes(15), TimeDelta::try_days(30).unwrap()).is_ok());
         assert!(AuthPolicy::new(TimeDelta::zero(), minutes(10)).is_err());
         assert!(AuthPolicy::new(minutes(30), minutes(30)).is_err());
+    }
+}
+
+// --- register: отдельный блок тестов, дописан к существующему mod tests ---
+#[cfg(test)]
+mod register_tests {
+    use secrecy::SecretString;
+
+    use super::*;
+    use crate::testing::Harness;
+
+    #[tokio::test]
+    async fn disabled_by_default() {
+        let h = Harness::new();
+        let err = h
+            .auth
+            .register(RegisterInput {
+                email: "new@example.com".into(),
+                password: SecretString::from("long-enough-pw"),
+                first_name: "N".into(),
+                second_name: "U".into(),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AuthError::Forbidden));
+    }
+
+    #[tokio::test]
+    async fn enabled_creates_and_logs_in_then_rejects_duplicate() {
+        let h = Harness::new();
+        let auth = AuthService::new(
+            h.users.clone(),
+            h.sessions.clone(),
+            h.hasher.clone(),
+            std::sync::Arc::new(crate::testing::FakeCodec),
+            std::sync::Arc::new(crate::testing::FakeRefresh::default()),
+            h.clock.clone(),
+            crate::testing::MemSettings::new(true),
+            AuthPolicy::default(),
+        );
+
+        let res = auth
+            .register(RegisterInput {
+                email: "new@example.com".into(),
+                password: SecretString::from("long-enough-pw"),
+                first_name: "N".into(),
+                second_name: "U".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(res.user.email.as_str(), "new@example.com");
+
+        let dup = auth
+            .register(RegisterInput {
+                email: "new@example.com".into(),
+                password: SecretString::from("long-enough-pw"),
+                first_name: "N".into(),
+                second_name: "U".into(),
+            })
+            .await;
+        assert!(matches!(dup, Err(AuthError::Conflict)));
     }
 }

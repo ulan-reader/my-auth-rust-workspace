@@ -277,6 +277,12 @@ pub struct AccessClaims {
     pub expires_at: DateTime<Utc>,
 }
 
+/// Настройки, которые меняются в рантайме через админку, а не через конфиг/редеплой.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeSettings {
+    pub allow_self_registration: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

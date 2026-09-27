@@ -1,0 +1,31 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: postgres
+
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: auth
+
+    ports:
+      - "2134:5432"
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/jaeger:latest
+    container_name: jaeger
+
+    ports:
+      - "16686:16686" # UI: http://localhost:16686
+      - "4317:4317"   # OTLP gRPC (не используем, но пусть будет)
+      - "4318:4318"   # OTLP HTTP — сюда шлёт auth-telemetry
+
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

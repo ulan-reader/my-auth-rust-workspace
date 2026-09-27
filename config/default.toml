@@ -1,0 +1,26 @@
+[server]
+bind = "127.0.0.1:8080"
+
+[api]
+request_timeout_secs = 15
+
+[postgres]
+max_connections = 10
+min_connections = 0
+acquire_timeout_secs = 5
+
+[auth]
+access_ttl_secs = 900
+refresh_ttl_secs = 2592000
+
+[crypto.argon2]
+m_cost_kib = 19456
+t_cost = 2
+p_cost = 1
+
+[telemetry]
+enabled = true
+service_name = "auth-service"
+otlp_endpoint = "http://localhost:4318"
+sample_ratio = 1.0
+log_level = "info"

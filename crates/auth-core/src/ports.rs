@@ -292,6 +292,12 @@ pub trait RefreshTokenProvider: Send + Sync {
     fn hash(&self, token: &SecretString) -> TokenHash;
 }
 
+#[async_trait]
+pub trait SettingsRepository: Send + Sync {
+    async fn get(&self) -> Result<RuntimeSettings>;
+    async fn set_allow_self_registration(&self, allowed: bool) -> Result<()>;
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
