@@ -45,6 +45,24 @@ impl AuthPolicyConfig {
     }
 }
 
+fn default_session_cleanup_interval_secs() -> u64 {
+    60 * 60 * 24 * 90 // 3 месяца
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct MaintenanceConfig {
+    pub session_cleanup_interval_secs: u64,
+}
+
+impl Default for MaintenanceConfig {
+    fn default() -> Self {
+        Self {
+            session_cleanup_interval_secs: default_session_cleanup_interval_secs(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
     pub server: ServerConfig,
@@ -56,4 +74,6 @@ pub struct AppConfig {
     pub crypto: CryptoConfig,
     #[serde(default)]
     pub telemetry: TelemetryConfig,
+    #[serde(default)]
+    pub maintenance: MaintenanceConfig,
 }

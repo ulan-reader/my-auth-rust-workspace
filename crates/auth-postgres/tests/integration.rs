@@ -258,3 +258,42 @@ async fn assign_role_conflict_and_effective_permissions() {
     let after = assignments.for_users(&[user.id]).await.unwrap();
     assert_eq!(after.get(&user.id).unwrap().len(), 1); // глобальная осталась
 }
+
+#[tokio::test]
+async fn session_purge_stale_removes_expired_and_old_revoked_but_keeps_live() {
+    let (_c, pool) = spin_up().await;
+    let users = PgUserRepository::new(pool.clone());
+    let sessions = PgSessionRepository::new(pool);
+    let user = users.create(&new_user("purge@example.com")).await.unwrap();
+
+    let now = Utc::now();
+    let long_ago = now - TimeDelta::try_days(200).unwrap();
+
+    let expired = sessions
+        .create(&NewSession {
+            user_id: user.id,
+            token_hash: TokenHash::new("purge-expired"),
+            created_at: long_ago,
+            expires_at: long_ago,
+        })
+        .await
+        .unwrap();
+    let live = sessions
+        .create(&NewSession {
+            user_id: user.id,
+            token_hash: TokenHash::new("purge-live"),
+            created_at: now,
+            expires_at: now + TimeDelta::try_days(30).unwrap(),
+        })
+        .await
+        .unwrap();
+    sessions
+        .revoke(user.id, expired.id, long_ago)
+        .await
+        .unwrap();
+    let cutoff = now - TimeDelta::try_days(90).unwrap();
+    let purged = sessions.purge_stale(cutoff).await.unwrap();
+    assert_eq!(purged, 1);
+    assert!(sessions.find_by_id(expired.id).await.unwrap().is_none());
+    assert!(sessions.find_by_id(live.id).await.unwrap().is_some());
+}

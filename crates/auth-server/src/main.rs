@@ -12,7 +12,10 @@ use auth_api::ApiState;
 use auth_core::{
     AuthError,
     domain::{Email, RoleScope},
-    ports::{NewRole, NewUser, PageRequest, PasswordHasher, RoleRepository, UserRepository},
+    ports::{
+        NewRole, NewUser, PageRequest, PasswordHasher, RoleRepository, SessionRepository,
+        UserRepository,
+    },
     service::{Ports, admin_permissions as perm},
 };
 use auth_crypto::{Argon2PasswordHasher, JwtCodec, Sha256RefreshTokenProvider};
@@ -113,12 +116,29 @@ async fn main() -> anyhow::Result<()> {
     let state = ApiState::from_ports(&ports, policy);
     let app = auth_api::router(state, &cfg.api);
 
+    let sessions_for_cleanup = ports.sessions.clone();
+    let cleanup_interval = cfg.maintenance.session_cleanup_interval_secs;
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(cleanup_interval));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            match sessions_for_cleanup.purge_stale(chrono::Utc::now()).await {
+                Ok(n) => info!(purged = n, "плановая чистка сессий"),
+                Err(e) => tracing::warn!(error = %e, "чистка сессий не удалась"),
+            }
+        }
+    });
+
     let listener = TcpListener::bind(cfg.server.bind).await.context("bind")?;
     info!(addr = %cfg.server.bind, "auth-server слушает");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("сервер упал")?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .context("сервер упал")?;
 
     Ok(())
 }
@@ -162,7 +182,7 @@ async fn bootstrap_admin(
     let all_perms = permissions.list().await?;
     let all_ids: Vec<_> = all_perms.iter().map(|p| p.id).collect();
     roles.set_permissions(admin_role.id, &all_ids).await?;
-    let _ = perm::USERS_VIEW; // права уже сидируются миграцией 0002 — сверяем коды там же
+    let _ = perm::USERS_VIEW; // права уже сидируются миграцией — сверяем коды там же
 
     let hash = hasher
         .hash(&SecretString::from(password.to_owned()))

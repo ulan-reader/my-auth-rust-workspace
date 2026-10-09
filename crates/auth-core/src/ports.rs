@@ -244,6 +244,10 @@ pub trait SessionRepository: Send + Sync {
 
     /// Возвращает, сколько сессий отозвано.
     async fn revoke_all_for_user(&self, user: UserId, now: DateTime<Utc>) -> Result<u64>;
+
+    /// Удаляет мёртвые сессии (просроченные или отозванные до `before`) — обслуживающая
+    /// операция для периодической чистки, а не бизнес-правило. Возвращает, сколько удалено.
+    async fn purge_stale(&self, before: DateTime<Utc>) -> Result<u64>;
 }
 
 // ===================== ПОРТЫ: ИНФРАСТРУКТУРА =====================

@@ -194,4 +194,14 @@ impl SessionRepository for PgSessionRepository {
         .map_err(map_db_error)?;
         Ok(result.rows_affected())
     }
+
+    async fn purge_stale(&self, before: DateTime<Utc>) -> Result<u64> {
+        let result = sqlx::query(
+        "delete from sessions where expires_at < `$1 or (revoked_at is not null and revoked_at < `$1)`",)
+        .bind(before)
+        .execute(&self.pool)
+        .await
+        .map_err(map_db_error)?;
+        Ok(result.rows_affected())
+    }
 }

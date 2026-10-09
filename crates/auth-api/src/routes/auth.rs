@@ -80,15 +80,21 @@ async fn me(AuthCtx(ctx): AuthCtx) -> Json<crate::dto::UserDto> {
 }
 
 // подавляем неиспользуемый импорт AuthError в некоторых конфигурациях компилятора
-#[allow(unused_imports)]
-use AuthError as _AuthErrorReexportForDocs;
-
-pub fn router() -> Router<ApiState> {
-    Router::new()
+/// `/login` и `/register` — под rate-limit (перебор пароля/спам-регистрации).
+/// Остальное — обычный аутентифицированный трафик, лимитировать незачем.
+pub fn router(rate_limit: &crate::rate_limit::RateLimitConfig) -> Router<ApiState> {
+    let limited = Router::new()
         .route("/login", post(login))
         .route("/register", post(register))
+        .layer(tower_governor::GovernorLayer::new(
+            crate::rate_limit::build(rate_limit),
+        ));
+
+    let rest = Router::new()
         .route("/refresh", post(refresh))
         .route("/logout", post(logout))
         .route("/logout-all", post(logout_all))
-        .route("/me", axum::routing::get(me))
+        .route("/me", axum::routing::get(me));
+
+    limited.merge(rest)
 }

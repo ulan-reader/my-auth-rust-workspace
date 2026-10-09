@@ -370,6 +370,16 @@ impl SessionRepository for MemSessions {
         }
         Ok(revoked)
     }
+
+    async fn purge_stale(&self, before: DateTime<Utc>) -> Result<u64> {
+        let mut rows = self.rows.lock().unwrap();
+        let before_count = rows.len();
+        rows.retain(|(s, _)| {
+            let stale = s.expires_at < before || s.revoked_at.is_some_and(|r| r < before);
+            !stale
+        });
+        Ok((before_count - rows.len()) as u64)
+    }
 }
 
 // ---------- права ----------

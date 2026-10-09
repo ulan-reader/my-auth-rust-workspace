@@ -3,6 +3,14 @@ bind = "127.0.0.1:8080"
 
 [api]
 request_timeout_secs = 15
+allowed_origins = []
+
+[api.rate_limit]
+per_second = 2
+burst_size = 5
+
+[maintenance]
+session_cleanup_interval_secs = 7776000
 
 [postgres]
 max_connections = 10
