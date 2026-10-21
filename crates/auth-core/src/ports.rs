@@ -248,6 +248,16 @@ pub trait SessionRepository: Send + Sync {
     /// Удаляет мёртвые сессии (просроченные или отозванные до `before`) — обслуживающая
     /// операция для периодической чистки, а не бизнес-правило. Возвращает, сколько удалено.
     async fn purge_stale(&self, before: DateTime<Utc>) -> Result<u64>;
+
+    /// То же самое, но без `except` — для самостоятельной смены пароля:
+    /// сессия, которой вызывающий пользуется прямо сейчас, должна пережить вызов,
+    /// иначе он тут же вылетит из-под себя на середине запроса.
+    async fn revoke_all_for_user_except(
+        &self,
+        user: UserId,
+        except: SessionId,
+        now: DateTime<Utc>,
+    ) -> Result<u64>;
 }
 
 // ===================== ПОРТЫ: ИНФРАСТРУКТУРА =====================
@@ -278,14 +288,18 @@ pub trait PasswordHasher: Send + Sync {
     async fn verify_dummy(&self, password: &SecretString);
 }
 
-/// Подпись и проверка access-токена.
-pub trait AccessTokenCodec: Send + Sync {
-    fn encode(&self, claims: &AccessClaims) -> Result<String>;
-
+/// Только проверка access-токена — этого достаточно стороннему сервису,
+/// у которого нет приватного ключа (см. `auth-crypto::Ed25519Verifier`).
+pub trait AccessTokenVerifier: Send + Sync {
     /// Проверяет подпись, issuer/audience и срок (по переданному `now`, а не по
     /// системным часам, чтобы тесты были детерминированными). Любая проблема ->
     /// `Unauthorized`, причину клиенту не раскрываем.
     fn decode(&self, token: &str, now: DateTime<Utc>) -> Result<AccessClaims>;
+}
+
+/// Подпись access-токена + проверка (всё из `AccessTokenVerifier`).
+pub trait AccessTokenCodec: AccessTokenVerifier {
+    fn encode(&self, claims: &AccessClaims) -> Result<String>;
 }
 
 pub trait RefreshTokenProvider: Send + Sync {

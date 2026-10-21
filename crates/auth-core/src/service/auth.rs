@@ -286,6 +286,40 @@ impl AuthService {
             .await
     }
 
+    /// Самостоятельная смена пароля (не админом): требует старый пароль.
+    /// При успехе отзывает все сессии пользователя, КРОМЕ той, из-под которой
+    /// сделан этот запрос — иначе вызывающий тут же вылетит из-под себя
+    /// на середине запроса. Возвращает, сколько ЧУЖИХ сессий отозвано.
+    #[instrument(skip_all, fields(user_id = %ctx.user_id()), err(level = Level::WARN))]
+    pub async fn change_own_password(
+        &self,
+        ctx: &AuthContext,
+        old_password: &SecretString,
+        new_password: &SecretString,
+    ) -> Result<u64> {
+        let creds = self
+            .users
+            .find_credentials_by_email(&ctx.user.email)
+            .await?
+            .ok_or(AuthError::Unauthorized)?;
+
+        if !self
+            .hasher
+            .verify(old_password, &creds.password_hash)
+            .await?
+        {
+            return Err(AuthError::InvalidCredentials);
+        }
+
+        validate_password(new_password)?;
+        let hash = self.hasher.hash(new_password).await?;
+        self.users.set_password_hash(ctx.user.id, &hash).await?;
+
+        self.sessions
+            .revoke_all_for_user_except(ctx.user.id, ctx.session_id, self.clock.now())
+            .await
+    }
+
     /// Проверка access-токена: подпись и срок, затем живая ли сессия и активен ли пользователь.
     /// Отзыв сессии и деактивация пользователя действуют сразу, без ожидания истечения токена.
     #[instrument(
@@ -625,6 +659,111 @@ mod tests {
             h.auth.refresh(&tokens.refresh_token).await,
             Err(AuthError::Unauthorized)
         ));
+    }
+
+    #[tokio::test]
+    async fn change_own_password_requires_correct_old_password() {
+        let h = Harness::new();
+        h.users.seed("klai@example.com", "old-password", true);
+        let tokens = h
+            .auth
+            .login("klai@example.com", &pw("old-password"))
+            .await
+            .unwrap()
+            .tokens;
+        let ctx = h
+            .auth
+            .authenticate(tokens.access_token.expose_secret())
+            .await
+            .unwrap();
+
+        let err = h
+            .auth
+            .change_own_password(&ctx, &pw("wrong-old-password"), &pw("new-password-123"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AuthError::InvalidCredentials));
+        // пароль не поменялся
+        h.auth
+            .login("klai@example.com", &pw("old-password"))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn change_own_password_keeps_current_session_but_kills_others() {
+        let h = Harness::new();
+        h.users.seed("klai@example.com", "old-password", true);
+        let device_a = h
+            .auth
+            .login("klai@example.com", &pw("old-password"))
+            .await
+            .unwrap()
+            .tokens;
+        let device_b = h
+            .auth
+            .login("klai@example.com", &pw("old-password"))
+            .await
+            .unwrap()
+            .tokens;
+        let ctx_a = h
+            .auth
+            .authenticate(device_a.access_token.expose_secret())
+            .await
+            .unwrap();
+
+        let revoked = h
+            .auth
+            .change_own_password(&ctx_a, &pw("old-password"), &pw("new-password-123"))
+            .await
+            .unwrap();
+        assert_eq!(revoked, 1); // только device_b
+
+        // текущая сессия (device_a) жива
+        assert!(
+            h.auth
+                .authenticate(device_a.access_token.expose_secret())
+                .await
+                .is_ok()
+        );
+        // device_b отозван
+        assert!(matches!(
+            h.auth.refresh(&device_b.refresh_token).await,
+            Err(AuthError::Unauthorized)
+        ));
+        // новый пароль работает, старый — нет
+        h.auth
+            .login("klai@example.com", &pw("new-password-123"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            h.auth.login("klai@example.com", &pw("old-password")).await,
+            Err(AuthError::InvalidCredentials)
+        ));
+    }
+
+    #[tokio::test]
+    async fn change_own_password_validates_new_password_length() {
+        let h = Harness::new();
+        h.users.seed("klai@example.com", "old-password", true);
+        let tokens = h
+            .auth
+            .login("klai@example.com", &pw("old-password"))
+            .await
+            .unwrap()
+            .tokens;
+        let ctx = h
+            .auth
+            .authenticate(tokens.access_token.expose_secret())
+            .await
+            .unwrap();
+
+        let err = h
+            .auth
+            .change_own_password(&ctx, &pw("old-password"), &pw("short"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AuthError::Validation(_)));
     }
 
     #[test]

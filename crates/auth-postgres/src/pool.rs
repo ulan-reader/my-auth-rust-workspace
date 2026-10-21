@@ -34,3 +34,9 @@ pub async fn connect(cfg: &PostgresConfig) -> Result<PgPool, sqlx::Error> {
 pub async fn migrate(pool: &PgPool) -> Result<(), MigrateError> {
     sqlx::migrate!("./migrations").run(pool).await
 }
+
+/// Быстрый round-trip в БД — для `/health/ready`. Не гоняет миграции,
+/// просто проверяет, что соединение живо.
+pub async fn ping(pool: &PgPool) -> Result<(), sqlx::Error> {
+    sqlx::query("select 1").execute(pool).await.map(|_| ())
+}

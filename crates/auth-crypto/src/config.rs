@@ -21,12 +21,31 @@ impl Default for Argon2Config {
     }
 }
 
+/// Публичный ключ, который ещё принимается при проверке, но не используется
+/// для подписи — нужен на время ротации: старый `kid` выдал токены с TTL
+/// до `access_ttl`, их нужно продолжать принимать, пока они не протухнут,
+/// уже подписывая новые текущим ключом.
+#[derive(Debug, Clone, Deserialize)]
+pub struct JwtVerificationKey {
+    pub kid: String,
+    /// base64url (без паддинга) сырых 32 байт публичного ключа Ed25519.
+    pub public_key: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct JwtConfig {
-    /// HMAC-секрет. Раздельные ключи для access и на будущее — под ротацию.
-    pub secret: SecretString,
+    /// base64url (без паддинга) 32-байтного seed приватного ключа Ed25519.
+    /// Сгенерировать: `cargo run -p auth-server -- jwt-keygen`.
+    pub signing_key: SecretString,
+    /// Идентификатор текущего ключа подписи — попадает в заголовок `kid`
+    /// каждого выданного токена и в JWKS.
+    pub kid: String,
     pub issuer: String,
     pub audience: String,
+    /// Ключи предыдущих поколений — всё ещё принимаются при проверке
+    /// (см. `JwtVerificationKey`), но ими никогда не подписывают.
+    #[serde(default)]
+    pub extra_verification_keys: Vec<JwtVerificationKey>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

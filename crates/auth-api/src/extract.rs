@@ -32,13 +32,13 @@ impl FromRequestParts<ApiState> for AuthCtx {
 /// нужен только тот же JWT-секрет (через auth-crypto::JwtCodec).
 #[derive(Clone)]
 pub struct JwtVerifier {
-    pub codec: std::sync::Arc<dyn auth_core::ports::AccessTokenCodec>,
+    pub codec: std::sync::Arc<dyn auth_core::ports::AccessTokenVerifier>,
     pub clock: std::sync::Arc<dyn auth_core::ports::Clock>,
 }
 
 impl JwtVerifier {
     pub fn new(
-        codec: std::sync::Arc<dyn auth_core::ports::AccessTokenCodec>,
+        codec: std::sync::Arc<dyn auth_core::ports::AccessTokenVerifier>,
         clock: std::sync::Arc<dyn auth_core::ports::Clock>,
     ) -> Self {
         Self { codec, clock }
@@ -77,12 +77,11 @@ where
 //     fn from_ref(s: &AppState) -> Self { s.verifier.clone() }
 // }
 //
-// // секрет — тот же AUTH__CRYPTO__JWT__SECRET, что у auth-server
+// // публичные ключи — из GET {auth-server}/.well-known/jwks.json
 // let verifier = JwtVerifier::new(
-//     Arc::new(JwtCodec::new(&jwt_cfg)),
+//     Arc::new(Ed25519Verifier::from_jwks_json(issuer, audience, &jwks_json)?),
 //     Arc::new(auth_core::ports::SystemClock),
 // );
-//
 // async fn my_handler(RemoteAuthCtx(claims): RemoteAuthCtx) -> impl IntoResponse {
 //     // claims.user_id — дальше сервис сам решает, что этому user_id можно
 // }

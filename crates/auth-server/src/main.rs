@@ -12,17 +12,15 @@ use auth_api::ApiState;
 use auth_core::{
     AuthError,
     domain::{Email, RoleScope},
-    ports::{
-        NewRole, NewUser, PageRequest, PasswordHasher, RoleRepository, SessionRepository,
-        UserRepository,
-    },
+    ports::{NewRole, NewUser, PageRequest, PasswordHasher, RoleRepository, UserRepository},
     service::{Ports, admin_permissions as perm},
 };
-use auth_crypto::{Argon2PasswordHasher, JwtCodec, Sha256RefreshTokenProvider};
+use auth_crypto::{Argon2PasswordHasher, Jwks, JwtCodec, Sha256RefreshTokenProvider};
 use auth_postgres::{
-    PgAssignmentRepository, PgPermissionRepository, PgRoleRepository, PgSessionRepository,
+    PgAssignmentRepository, PgPermissionRepository, PgPool, PgRoleRepository, PgSessionRepository,
     PgSettingsRepository, PgUserRepository,
 };
+use axum::{Json, Router, http::StatusCode, routing::get};
 use clap::{Parser, Subcommand};
 use config::AppConfig;
 use secrecy::SecretString;
@@ -48,12 +46,29 @@ enum Command {
         #[arg(long, default_value = "User")]
         second_name: String,
     },
+    /// Сгенерировать новую пару ключей Ed25519 для crypto.jwt.*.
+    /// Ничего не пишет в БД/конфиг — значения нужно положить в .env/config вручную.
+    JwtKeygen,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
     let cli = Cli::parse();
+
+    // Не требует конфига/БД — можно звать даже до первого запуска сервера.
+    if matches!(cli.command, Some(Command::JwtKeygen)) {
+        let (seed, public) = auth_crypto::generate_signing_key().context("генерация ключа")?;
+        println!("Новый ключ Ed25519 сгенерирован.\n");
+        println!("AUTH__CRYPTO__JWT__SIGNING_KEY={seed}");
+        println!("AUTH__CRYPTO__JWT__KID=<придумай идентификатор, например дату>\n");
+        println!(
+            "Публичный ключ (x, base64url): {public}\n\
+             При ротации положи его в crypto.jwt.extra_verification_keys под старым kid,\n\
+             чтобы токены, выданные до смены ключа, ещё проходили проверку до истечения TTL."
+        );
+        return Ok(());
+    }
 
     let env = std::env::var("AUTH_ENV").unwrap_or_else(|_| "dev".into());
     let cfg: AppConfig = ::config::Config::builder()
@@ -75,6 +90,10 @@ async fn main() -> anyhow::Result<()> {
     let users_repo = PgUserRepository::new(pool.clone());
     let roles_repo = PgRoleRepository::new(pool.clone());
     let hasher = Argon2PasswordHasher::new(&cfg.crypto.argon2).context("argon2")?;
+    let jwt_codec = Arc::new(
+        JwtCodec::new(&cfg.crypto.jwt)
+            .context("ключ подписи JWT (проверь AUTH__CRYPTO__JWT__SIGNING_KEY/KID)")?,
+    );
 
     if let Some(Command::BootstrapAdmin {
         email,
@@ -106,7 +125,7 @@ async fn main() -> anyhow::Result<()> {
         permissions: Arc::new(PgPermissionRepository::new(pool.clone())),
         sessions: Arc::new(PgSessionRepository::new(pool.clone())),
         hasher: Arc::new(hasher),
-        access_tokens: Arc::new(JwtCodec::new(&cfg.crypto.jwt)),
+        access_tokens: jwt_codec.clone(),
         refresh_tokens: Arc::new(Sha256RefreshTokenProvider),
         clock: Arc::new(auth_core::ports::SystemClock),
         settings: Arc::new(PgSettingsRepository::new(pool.clone())),
@@ -114,31 +133,16 @@ async fn main() -> anyhow::Result<()> {
 
     let policy = cfg.auth.build().context("auth policy")?;
     let state = ApiState::from_ports(&ports, policy);
-    let app = auth_api::router(state, &cfg.api);
-
-    let sessions_for_cleanup = ports.sessions.clone();
-    let cleanup_interval = cfg.maintenance.session_cleanup_interval_secs;
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(cleanup_interval));
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            ticker.tick().await;
-            match sessions_for_cleanup.purge_stale(chrono::Utc::now()).await {
-                Ok(n) => info!(purged = n, "плановая чистка сессий"),
-                Err(e) => tracing::warn!(error = %e, "чистка сессий не удалась"),
-            }
-        }
-    });
+    let app = auth_api::router(state, &cfg.api)
+        .merge(jwks_router(jwt_codec))
+        .merge(health_router(pool.clone()));
 
     let listener = TcpListener::bind(cfg.server.bind).await.context("bind")?;
     info!(addr = %cfg.server.bind, "auth-server слушает");
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .await
-    .context("сервер упал")?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .context("сервер упал")?;
 
     Ok(())
 }
@@ -182,7 +186,7 @@ async fn bootstrap_admin(
     let all_perms = permissions.list().await?;
     let all_ids: Vec<_> = all_perms.iter().map(|p| p.id).collect();
     roles.set_permissions(admin_role.id, &all_ids).await?;
-    let _ = perm::USERS_VIEW; // права уже сидируются миграцией — сверяем коды там же
+    let _ = perm::USERS_VIEW; // права уже сидируются миграцией 0002 — сверяем коды там же
 
     let hash = hasher
         .hash(&SecretString::from(password.to_owned()))
@@ -218,4 +222,45 @@ async fn bootstrap_admin(
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
     tracing::info!("получен Ctrl+C, останавливаемся");
+}
+
+/// Публикация публичных ключей проверки JWT — отдельно от `auth_api::router`,
+/// чтобы auth-api не зависел от auth-crypto (гексагональная граница).
+/// Без аутентификации: это ровно то, что сторонние сервисы должны уметь
+/// забрать без привилегий, чтобы проверять токены локально (см. JwtVerifier).
+fn jwks_router(codec: Arc<JwtCodec>) -> Router {
+    async fn jwks(axum::extract::State(codec): axum::extract::State<Arc<JwtCodec>>) -> Json<Jwks> {
+        Json(codec.jwks().clone())
+    }
+
+    Router::new()
+        .route("/.well-known/jwks.json", get(jwks))
+        .with_state(codec)
+}
+
+/// `/health/live` — процесс жив и отвечает, без походов во внешний мир.
+/// Отдельно от `/health/ready`: оркестратор не должен убивать под из-за
+/// временной недоступности БД, если сам процесс в порядке (live != ready).
+///
+/// `/health/ready` — живо ли соединение с Postgres. `503`, если нет: под
+/// снимается с ротации трафика, но не перезапускается (это не live-check).
+fn health_router(pool: PgPool) -> Router {
+    async fn live() -> StatusCode {
+        StatusCode::OK
+    }
+
+    async fn ready(axum::extract::State(pool): axum::extract::State<PgPool>) -> StatusCode {
+        match auth_postgres::ping(&pool).await {
+            Ok(()) => StatusCode::OK,
+            Err(e) => {
+                tracing::warn!(error = %e, "health/ready: postgres недоступен");
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+        }
+    }
+
+    Router::new()
+        .route("/health/live", get(live))
+        .route("/health/ready", get(ready))
+        .with_state(pool)
 }

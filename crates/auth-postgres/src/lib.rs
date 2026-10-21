@@ -11,8 +11,12 @@ mod users;
 
 pub use assignments::PgAssignmentRepository;
 pub use permissions::PgPermissionRepository;
-pub use pool::{PostgresConfig, connect, migrate};
+pub use pool::{PostgresConfig, connect, migrate, ping};
 pub use roles::PgRoleRepository;
 pub use sessions::PgSessionRepository;
 pub use settings::PgSettingsRepository;
 pub use users::PgUserRepository;
+
+/// Реэкспорт, чтобы `auth-server` не тащил `sqlx` явной зависимостью только
+/// для аннотации типа (например, в сигнатуре health-check функции).
+pub use sqlx::PgPool;

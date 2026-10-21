@@ -1,4 +1,3 @@
-use auth_core::AuthError;
 use axum::{Json, Router, extract::State, routing::post};
 use secrecy::SecretString;
 use serde::Deserialize;
@@ -69,6 +68,32 @@ async fn logout_all(State(state): State<ApiState>, AuthCtx(ctx): AuthCtx) -> Res
     Ok(())
 }
 
+#[derive(Deserialize)]
+pub struct ChangePasswordRequest {
+    pub old_password: SecretString,
+    pub new_password: SecretString,
+}
+
+#[derive(serde::Serialize)]
+pub struct ChangePasswordResponse {
+    /// Сколько ЧУЖИХ сессий отозвано (текущая, из-под которой сделан запрос, жива).
+    pub other_sessions_revoked: u64,
+}
+
+async fn change_password(
+    State(state): State<ApiState>,
+    AuthCtx(ctx): AuthCtx,
+    Json(req): Json<ChangePasswordRequest>,
+) -> Result<Json<ChangePasswordResponse>, ApiError> {
+    let other_sessions_revoked = state
+        .auth
+        .change_own_password(&ctx, &req.old_password, &req.new_password)
+        .await?;
+    Ok(Json(ChangePasswordResponse {
+        other_sessions_revoked,
+    }))
+}
+
 async fn me(AuthCtx(ctx): AuthCtx) -> Json<crate::dto::UserDto> {
     Json(
         auth_core::service::UserWithRoles {
@@ -86,6 +111,7 @@ pub fn router(rate_limit: &crate::rate_limit::RateLimitConfig) -> Router<ApiStat
     let limited = Router::new()
         .route("/login", post(login))
         .route("/register", post(register))
+        .route("/me/password", post(change_password))
         .layer(tower_governor::GovernorLayer::new(
             crate::rate_limit::build(rate_limit),
         ));

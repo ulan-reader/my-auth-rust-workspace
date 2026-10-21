@@ -204,4 +204,23 @@ impl SessionRepository for PgSessionRepository {
         .map_err(map_db_error)?;
         Ok(result.rows_affected())
     }
+
+    #[instrument(skip(self), err)]
+    async fn revoke_all_for_user_except(
+        &self,
+        user: UserId,
+        except: SessionId,
+        now: DateTime<Utc>,
+    ) -> Result<u64> {
+        let result = sqlx::query(
+            "update sessions set revoked_at = $1 where user_id = $2 and id != $3 and revoked_at is null",
+        )
+        .bind(now)
+        .bind(user.0)
+        .bind(except.0)
+        .execute(&self.pool)
+        .await
+        .map_err(map_db_error)?;
+        Ok(result.rows_affected())
+    }
 }

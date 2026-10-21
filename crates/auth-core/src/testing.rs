@@ -29,7 +29,7 @@ impl FakeClock {
 
     pub fn advance(&self, by: TimeDelta) {
         let mut now = self.0.lock().unwrap();
-        *now = *now + by;
+        *now += by;
     }
 }
 
@@ -67,17 +67,7 @@ impl PasswordHasher for FakeHasher {
 /// Токен = `user:session:iat:exp`. Подписи нет, но срок и формат проверяются.
 pub struct FakeCodec;
 
-impl AccessTokenCodec for FakeCodec {
-    fn encode(&self, c: &AccessClaims) -> Result<String> {
-        Ok(format!(
-            "{}:{}:{}:{}",
-            c.user_id.0,
-            c.session_id.0,
-            c.issued_at.timestamp(),
-            c.expires_at.timestamp()
-        ))
-    }
-
+impl AccessTokenVerifier for FakeCodec {
     fn decode(&self, token: &str, now: DateTime<Utc>) -> Result<AccessClaims> {
         let parts: Vec<i64> = token
             .split(':')
@@ -98,6 +88,18 @@ impl AccessTokenCodec for FakeCodec {
             issued_at,
             expires_at,
         })
+    }
+}
+
+impl AccessTokenCodec for FakeCodec {
+    fn encode(&self, c: &AccessClaims) -> Result<String> {
+        Ok(format!(
+            "{}:{}:{}:{}",
+            c.user_id.0,
+            c.session_id.0,
+            c.issued_at.timestamp(),
+            c.expires_at.timestamp()
+        ))
     }
 }
 
@@ -379,6 +381,24 @@ impl SessionRepository for MemSessions {
             !stale
         });
         Ok((before_count - rows.len()) as u64)
+    }
+
+    async fn revoke_all_for_user_except(
+        &self,
+        user: UserId,
+        except: SessionId,
+        now: DateTime<Utc>,
+    ) -> Result<u64> {
+        let mut rows = self.rows.lock().unwrap();
+        let mut revoked = 0;
+        for (s, _) in rows
+            .iter_mut()
+            .filter(|(s, _)| s.user_id == user && s.id != except && s.revoked_at.is_none())
+        {
+            s.revoked_at = Some(now);
+            revoked += 1;
+        }
+        Ok(revoked)
     }
 }
 
