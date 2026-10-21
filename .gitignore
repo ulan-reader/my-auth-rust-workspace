@@ -1,1 +1,9 @@
 /target
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Local development
+.DS_Store
