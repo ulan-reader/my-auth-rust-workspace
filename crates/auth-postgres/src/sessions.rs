@@ -197,7 +197,12 @@ impl SessionRepository for PgSessionRepository {
 
     async fn purge_stale(&self, before: DateTime<Utc>) -> Result<u64> {
         let result = sqlx::query(
-        "delete from sessions where expires_at < `$1 or (revoked_at is not null and revoked_at < `$1)`",)
+            r#"
+            DELETE FROM sessions
+            WHERE expires_at < $1
+               OR (revoked_at IS NOT NULL AND revoked_at < $1)
+            "#,
+        )
         .bind(before)
         .execute(&self.pool)
         .await

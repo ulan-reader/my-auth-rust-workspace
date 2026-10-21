@@ -12,8 +12,11 @@ use auth_api::ApiState;
 use auth_core::{
     AuthError,
     domain::{Email, RoleScope},
-    ports::{NewRole, NewUser, PageRequest, PasswordHasher, RoleRepository, UserRepository},
-    service::{Ports, admin_permissions as perm},
+    ports::{
+        NewRole, NewUser, PageRequest, PasswordHasher, RoleRepository, SessionRepository,
+        UserRepository,
+    },
+    service::Ports,
 };
 use auth_crypto::{Argon2PasswordHasher, Jwks, JwtCodec, Sha256RefreshTokenProvider};
 use auth_postgres::{
@@ -21,9 +24,11 @@ use auth_postgres::{
     PgSettingsRepository, PgUserRepository,
 };
 use axum::{Json, Router, http::StatusCode, routing::get};
+use chrono::{Duration as ChronoDuration, Utc};
 use clap::{Parser, Subcommand};
 use config::AppConfig;
 use secrecy::SecretString;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tracing::info;
 
@@ -94,6 +99,7 @@ async fn main() -> anyhow::Result<()> {
         JwtCodec::new(&cfg.crypto.jwt)
             .context("ключ подписи JWT (проверь AUTH__CRYPTO__JWT__SIGNING_KEY/KID)")?,
     );
+    let sessions = Arc::new(PgSessionRepository::new(pool.clone()));
 
     if let Some(Command::BootstrapAdmin {
         email,
@@ -123,13 +129,44 @@ async fn main() -> anyhow::Result<()> {
         roles: Arc::new(roles_repo),
         assignments: Arc::new(PgAssignmentRepository::new(pool.clone())),
         permissions: Arc::new(PgPermissionRepository::new(pool.clone())),
-        sessions: Arc::new(PgSessionRepository::new(pool.clone())),
+        sessions: sessions.clone(),
         hasher: Arc::new(hasher),
         access_tokens: jwt_codec.clone(),
         refresh_tokens: Arc::new(Sha256RefreshTokenProvider),
         clock: Arc::new(auth_core::ports::SystemClock),
         settings: Arc::new(PgSettingsRepository::new(pool.clone())),
     };
+
+    let cleanup_interval =
+        Duration::from_secs(cfg.maintenance.session_cleanup_interval_secs.max(1));
+
+    let retention_secs = i64::try_from(cfg.maintenance.session_retention_secs).unwrap_or(i64::MAX);
+
+    let sessions_for_cleanup = sessions.clone();
+
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(cleanup_interval);
+
+        interval.tick().await;
+
+        loop {
+            interval.tick().await;
+
+            let before = Utc::now() - ChronoDuration::seconds(retention_secs);
+
+            match sessions_for_cleanup.purge_stale(before).await {
+                Ok(deleted) => {
+                    tracing::info!(deleted, "Очистка устаревших сессий завершена");
+                }
+                Err(error) => {
+                    tracing::error!(
+                        error = %error,
+                        "Не удалось очистить устаревшие сессии"
+                    );
+                }
+            }
+        }
+    });
 
     let policy = cfg.auth.build().context("auth policy")?;
     let state = ApiState::from_ports(&ports, policy);
@@ -163,8 +200,7 @@ async fn bootstrap_admin(
 
     let admin_role = match roles
         .create(&NewRole {
-            code: auth_core::domain::RoleCode::parse("admin")
-                .or_else(|_| auth_core::domain::RoleCode::parse("admin"))?,
+            code: auth_core::domain::RoleCode::parse("admin")?,
             name: "Admin".into(),
             scope: RoleScope::Global,
         })
@@ -186,7 +222,6 @@ async fn bootstrap_admin(
     let all_perms = permissions.list().await?;
     let all_ids: Vec<_> = all_perms.iter().map(|p| p.id).collect();
     roles.set_permissions(admin_role.id, &all_ids).await?;
-    let _ = perm::USERS_VIEW; // права уже сидируются миграцией 0002 — сверяем коды там же
 
     let hash = hasher
         .hash(&SecretString::from(password.to_owned()))

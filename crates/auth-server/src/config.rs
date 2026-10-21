@@ -46,19 +46,25 @@ impl AuthPolicyConfig {
 }
 
 fn default_session_cleanup_interval_secs() -> u64 {
-    60 * 60 * 24 * 90 // 3 месяца
+    60 * 60 // каждый час
+}
+
+fn default_session_retention_secs() -> u64 {
+    60 * 60 * 24 * 90 // хранить 90 дней
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct MaintenanceConfig {
     pub session_cleanup_interval_secs: u64,
+    pub session_retention_secs: u64,
 }
 
 impl Default for MaintenanceConfig {
     fn default() -> Self {
         Self {
             session_cleanup_interval_secs: default_session_cleanup_interval_secs(),
+            session_retention_secs: default_session_retention_secs(),
         }
     }
 }

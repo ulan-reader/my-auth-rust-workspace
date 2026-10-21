@@ -10,7 +10,8 @@ per_second = 2
 burst_size = 5
 
 [maintenance]
-session_cleanup_interval_secs = 7776000
+session_cleanup_interval_secs = 3600
+session_retention_secs = 7776000
 
 [postgres]
 max_connections = 10
