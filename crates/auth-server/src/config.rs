@@ -5,7 +5,15 @@ use auth_crypto::CryptoConfig;
 use auth_postgres::PostgresConfig;
 use auth_telemetry::TelemetryConfig;
 use chrono::TimeDelta;
+use secrecy::SecretString;
 use serde::Deserialize;
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SetupConfig {
+    /// Одноразовый секрет первоначальной настройки (`AUTH__SETUP__TOKEN`).
+    /// Не задан — POST /setup выключен.
+    pub token: Option<SecretString>,
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfig {
@@ -82,4 +90,6 @@ pub struct AppConfig {
     pub telemetry: TelemetryConfig,
     #[serde(default)]
     pub maintenance: MaintenanceConfig,
+    #[serde(default)]
+    pub setup: SetupConfig,
 }

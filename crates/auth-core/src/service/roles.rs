@@ -106,6 +106,18 @@ impl RoleService {
             .require_permission(actor, perm::ROLES_MANAGE, None)
             .await?;
 
+        self.require_holds_role(actor, id, None).await?;
+        let current = self
+            .roles
+            .find_by_id(id)
+            .await?
+            .ok_or(AuthError::NotFound)?;
+        if current.code.as_str() == ADMIN_ROLE_CODE && input.code.trim() != ADMIN_ROLE_CODE {
+            return Err(AuthError::validation(
+                "код системной роли admin менять нельзя",
+            ));
+        }
+
         let upd = RoleUpdate {
             code: RoleCode::parse(&input.code)?,
             name: clean_name(&input.name)?,
@@ -120,6 +132,14 @@ impl RoleService {
         self.access
             .require_permission(actor, perm::ROLES_MANAGE, None)
             .await?;
+
+        self.require_holds_role(actor, id, None).await?;
+        let current = self
+            .roles
+            .find_by_id(id)
+            .await?
+            .ok_or(AuthError::NotFound)?;
+        ensure_not_system(&current, "удалить")?;
         self.roles.delete(id).await
     }
 
@@ -146,6 +166,17 @@ impl RoleService {
         self.access
             .require_permission(actor, perm::ROLES_MANAGE, None)
             .await?;
+
+        self.require_holds_role(actor, role, None).await?;
+        let wanted = self.access.codes_of(permission_ids).await?;
+        self.access.require_all(actor, &wanted, None).await?;
+        let current = self
+            .roles
+            .find_by_id(role)
+            .await?
+            .ok_or(AuthError::NotFound)?;
+        ensure_not_system(&current, "редактировать по правам: у неё всегда все права")?;
+
         self.roles.set_permissions(role, permission_ids).await
     }
 
@@ -165,6 +196,9 @@ impl RoleService {
         let scope = input.scope.as_deref().map(ScopeId::parse).transpose()?;
         role.scope.check_assignment(scope.as_ref())?;
 
+        self.require_holds_role(actor, role.id, scope.as_ref())
+            .await?;
+
         self.assignments
             .assign(input.user, input.role, scope.as_ref())
             .await
@@ -178,8 +212,24 @@ impl RoleService {
             .await?;
 
         let scope = input.scope.as_deref().map(ScopeId::parse).transpose()?;
+        self.require_holds_role(actor, input.role, scope.as_ref())
+            .await?;
         self.assignments
             .unassign(input.user, input.role, scope.as_ref())
+            .await
+    }
+
+    /// Трогать роль можно, только если у тебя есть все её права: иначе через
+    /// назначение или правку роли можно поднять себе (или снять с других) чужие права.
+    async fn require_holds_role(
+        &self,
+        actor: &AuthContext,
+        role: RoleId,
+        scope: Option<&ScopeId>,
+    ) -> Result<()> {
+        let perms = self.roles.permissions_of(role).await?;
+        self.access
+            .require_all(actor, perms.iter().map(|p| &p.code), scope)
             .await
     }
 }
@@ -196,6 +246,15 @@ fn clean_name(raw: &str) -> Result<String> {
         ));
     }
     Ok(name.to_owned())
+}
+
+fn ensure_not_system(role: &Role, action: &str) -> Result<()> {
+    if role.code.as_str() == ADMIN_ROLE_CODE {
+        return Err(AuthError::validation(format!(
+            "системную роль admin нельзя {action}"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -442,5 +501,41 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cannot_assign_role_with_permissions_actor_lacks() {
+        let f = fixture();
+        let role = f
+            .svc
+            .create(
+                &f.admin,
+                CreateRole {
+                    code: "super".into(),
+                    name: "Super".into(),
+                    scope: RoleScope::Global,
+                },
+            )
+            .await
+            .unwrap();
+        // MemRoles называет права "perm-{id}"
+        f.svc
+            .set_permissions(&f.admin, role.id, &[PermissionId(42)])
+            .await
+            .unwrap();
+        let victim = f.h.users.seed("victim@example.com", "password-1", true);
+        let assign = || AssignRole {
+            user: victim.id,
+            role: role.id,
+            scope: None,
+        };
+
+        assert!(matches!(
+            f.svc.assign(&f.admin, assign()).await,
+            Err(AuthError::Forbidden)
+        ));
+
+        f.h.permissions.grant(f.admin.user_id(), None, "perm-42");
+        f.svc.assign(&f.admin, assign()).await.unwrap();
     }
 }

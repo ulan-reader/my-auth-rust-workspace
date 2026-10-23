@@ -45,7 +45,7 @@ runtime-настройки (например, включение саморег�
 | `auth-crypto` | Argon2id, JWT (EdDSA/Ed25519) + JWKS, refresh-токены | [crates/auth-crypto](crates/auth-crypto/README.md) |
 | `auth-telemetry` | tracing → OTLP/HTTP → Jaeger | [crates/auth-telemetry](crates/auth-telemetry/README.md) |
 | `auth-api` | axum-роутер поверх core, DTO, HTTP-коды ошибок, rate-limit, CORS, лёгкий JWT-экстрактор для сторонних сервисов | [crates/auth-api](crates/auth-api/README.md) |
-| `auth-server` | Собирает всё вместе, запускает HTTP, CLI (`bootstrap-admin`, `jwt-keygen`) | [crates/auth-server](crates/auth-server/README.md) |
+| `auth-server` | Собирает всё вместе, запускает HTTP, CLI (`jwt-keygen`) | [crates/auth-server](crates/auth-server/README.md) |
 
 `apps/admin-ui` — фронт админки на Leptos (CSR), в workspace не входит,
 собирается отдельно через `trunk`.
@@ -60,14 +60,30 @@ copy .env.example .env
 # сгенерировать ключ подписи JWT и вписать вывод в .env
 docker compose --profile dev run --rm auth-dev cargo run -p auth-server -- jwt-keygen
 
+# вписать в .env AUTH__SETUP__TOKEN (минимум 32 символа), например вывод:
+#   openssl rand -base64 32
+
 # Postgres + Jaeger + сервер с автопересборкой при сохранении файлов
 docker compose --profile dev up
-
-# первый администратор (в соседнем терминале)
-docker compose --profile dev exec auth-dev cargo run -p auth-server -- bootstrap-admin --email admin@example.com --password super-secret-1
 ```
 
 Сервер — `http://localhost:8080`, Jaeger UI — `http://localhost:16686`.
+
+### Первый администратор
+
+Создаётся один раз через API — CLI не нужен:
+
+```powershell
+Invoke-RestMethod http://localhost:8080/setup        # {"required": true}
+
+Invoke-RestMethod -Method Post -Uri http://localhost:8080/setup -ContentType "application/json" `
+  -Body (@{ setup_token = "<AUTH__SETUP__TOKEN>"; email = "admin@example.com"; password = "super-secret-1";
+            first_name = "Admin"; second_name = "Root" } | ConvertTo-Json)    # 201
+```
+
+После этого `/setup` закрыт навсегда (флаг в БД): повторные и параллельные
+запросы получают `404`, `GET /setup` отдаёт `{"required": false}`. Без
+`AUTH__SETUP__TOKEN` эндпоинт выключен. Переменную после настройки можно удалить.
 
 | Команда | Что поднимает |
 |---|---|
@@ -85,11 +101,12 @@ docker compose --profile dev exec auth-dev cargo run -p auth-server -- bootstrap
 
 ```powershell
 docker compose up -d                                   # Postgres + Jaeger
-copy .env.example .env                                 # заполнить ключ JWT
+copy .env.example .env                                 # заполнить ключ JWT и AUTH__SETUP__TOKEN
 cargo run -p auth-server -- jwt-keygen                 # вывод — в .env
-cargo run -p auth-server -- bootstrap-admin --email admin@example.com --password super-secret-1
 cargo run -p auth-server                               # слушает 127.0.0.1:8080
 ```
+
+Первый администратор — через `POST /setup`, как выше.
 
 ## Конфиг
 
@@ -103,6 +120,7 @@ AUTH__CRYPTO__JWT__SIGNING_KEY=<base64url seed Ed25519, из jwt-keygen>
 AUTH__CRYPTO__JWT__KID=<идентификатор ключа, например дата>
 AUTH__CRYPTO__JWT__ISSUER=...
 AUTH__CRYPTO__JWT__AUDIENCE=...
+AUTH__SETUP__TOKEN=<только для первоначальной настройки>
 ```
 
 Подробности по каждой секции — в [crates/auth-server](crates/auth-server/README.md).
@@ -126,6 +144,21 @@ Invoke-RestMethod -Uri http://localhost:8080/users -Headers @{ Authorization = "
   интересует).
 - Правило соответствия (`RoleScope::check_assignment`) живёт в домене, а не
   размазано по хендлерам.
+
+### Защита от эскалации прав
+
+- **Нельзя выдать больше, чем имеешь сам.** Назначить, снять, изменить или
+  удалить роль может только тот, у кого есть все её права; задать роли набор
+  прав — только тот, у кого есть и старые, и новые права.
+- **Нельзя управлять более сильным пользователем.** Сменить пароль,
+  заблокировать, изменить или удалить можно только того, чьи глобальные права
+  входят в твои.
+- **`admin` — системная роль**: у неё всегда все права; удалить её,
+  переименовать или урезать по правам нельзя. Новые права выдаются ей
+  миграциями.
+- **Последний администратор неприкосновенен**: снять с него роль, заблокировать
+  или удалить нельзя — проверка в транзакции под общей блокировкой, так что и
+  параллельные запросы не оставят систему без админа.
 
 ## Runtime-настройки
 

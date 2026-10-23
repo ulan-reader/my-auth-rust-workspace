@@ -154,9 +154,13 @@ pub trait UserRepository: Send + Sync {
 
     async fn set_password_hash(&self, id: UserId, hash: &PasswordHash) -> Result<()>;
 
+    /// Не может оставить систему без активного администратора: если до операции
+    /// админ был, а после не осталось ни одного — `Validation`, изменения откатываются.
     async fn set_active(&self, id: UserId, active: bool) -> Result<()>;
 
     /// Атомарно вместе с назначениями ролей и сессиями пользователя.
+    /// Не может оставить систему без активного администратора: если до операции
+    /// админ был, а после не осталось ни одного — `Validation`, изменения откатываются.
     async fn delete(&self, id: UserId) -> Result<()>;
 }
 
@@ -194,6 +198,8 @@ pub trait AssignmentRepository: Send + Sync {
     async fn assign(&self, user: UserId, role: RoleId, scope: Option<&ScopeId>) -> Result<()>;
 
     /// Идемпотентно: отсутствие назначения — не ошибка.
+    /// Не может оставить систему без активного администратора: если до операции
+    /// админ был, а после не осталось ни одного — `Validation`, изменения откатываются.
     async fn unassign(&self, user: UserId, role: RoleId, scope: Option<&ScopeId>) -> Result<()>;
 
     /// Снять все назначения внутри scope. Вызывает проект, когда удаляет
@@ -314,6 +320,17 @@ pub trait RefreshTokenProvider: Send + Sync {
 pub trait SettingsRepository: Send + Sync {
     async fn get(&self) -> Result<RuntimeSettings>;
     async fn set_allow_self_registration(&self, allowed: bool) -> Result<()>;
+}
+
+#[async_trait]
+pub trait SetupRepository: Send + Sync {
+    async fn is_completed(&self) -> Result<bool>;
+
+    /// В ОДНОЙ транзакции: блокирует строку настроек, проверяет, что настройка не
+    /// выполнена и админа нет; создаёт роль `admin` (если её нет) со всеми правами,
+    /// пользователя, назначение и ставит отметку о завершении.
+    /// Уже выполнена (в т.ч. параллельным запросом) -> `NotFound`; email занят -> `Conflict`.
+    async fn create_first_admin(&self, new: &NewUser, now: DateTime<Utc>) -> Result<User>;
 }
 
 #[cfg(test)]

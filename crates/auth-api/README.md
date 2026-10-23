@@ -23,12 +23,13 @@ GET    /roles/{id}/permissions     PUT /roles/{id}/permissions
 POST   /roles/{user}/{role}?scope=...    DELETE /roles/{user}/{role}?scope=...
 GET    /permissions
 GET    /settings          PUT /settings
+GET    /setup             POST /setup      (первоначальная настройка, один раз)
 ```
 
 ## Защита
 
 - **Rate-limit** (`api.rate_limit`) — на `/auth/login`, `/auth/register`,
-  `/auth/me/password`. Ключ — IP соединения (`ConnectInfo`, поэтому сервер
+  `/auth/me/password` и `/setup` (общая квота на IP). Ключ — IP соединения (`ConnectInfo`, поэтому сервер
   запускается через `into_make_service_with_connect_info`). `X-Forwarded-For`
   принимается только от прокси из `trusted_proxies`: цепочка разбирается
   справа налево, первый недоверенный адрес считается клиентом.

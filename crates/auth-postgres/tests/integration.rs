@@ -9,12 +9,12 @@ use auth_core::{
     domain::{Email, PasswordHash, RoleScope, ScopeId, TokenHash, UserId},
     ports::{
         AssignmentRepository, NewRole, NewSession, NewUser, PageRequest, PermissionRepository,
-        RoleRepository, SessionRepository, UserRepository, UserUpdate,
+        RoleRepository, SessionRepository, SetupRepository, UserRepository, UserUpdate,
     },
 };
 use auth_postgres::{
     PgAssignmentRepository, PgPermissionRepository, PgRoleRepository, PgSessionRepository,
-    PgUserRepository,
+    PgSetupRepository, PgUserRepository,
 };
 use chrono::{TimeDelta, Utc};
 use sqlx::PgPool;
@@ -296,4 +296,66 @@ async fn session_purge_stale_removes_expired_and_old_revoked_but_keeps_live() {
     assert_eq!(purged, 1);
     assert!(sessions.find_by_id(expired.id).await.unwrap().is_none());
     assert!(sessions.find_by_id(live.id).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn first_admin_is_created_once_even_in_parallel() {
+    let (_c, pool) = spin_up().await;
+    let repo = std::sync::Arc::new(PgSetupRepository::new(pool));
+
+    let tasks: Vec<_> = (0..10)
+        .map(|i| {
+            let repo = repo.clone();
+            tokio::spawn(async move {
+                repo.create_first_admin(&new_user(&format!("a{i}@example.com")), chrono::Utc::now())
+                    .await
+            })
+        })
+        .collect();
+
+    let mut created = 0;
+    for t in tasks {
+        if t.await.unwrap().is_ok() {
+            created += 1;
+        }
+    }
+    assert_eq!(created, 1, "ровно один первый администратор");
+    assert!(repo.is_completed().await.unwrap());
+}
+
+#[tokio::test]
+async fn two_admins_cannot_remove_each_other_concurrently() {
+    let (_c, pool) = spin_up().await;
+    let setup = PgSetupRepository::new(pool.clone());
+    let users = PgUserRepository::new(pool.clone());
+    let assignments = std::sync::Arc::new(PgAssignmentRepository::new(pool));
+
+    let a = setup
+        .create_first_admin(&new_user("a@example.com"), chrono::Utc::now())
+        .await
+        .unwrap();
+    let b = users.create(&new_user("b@example.com")).await.unwrap();
+    let admin_role = auth_core::domain::RoleId(1); // создана в create_first_admin
+    assignments.assign(b.id, admin_role, None).await.unwrap();
+
+    // оба одновременно снимают роль admin друг с друга
+    let (r1, r2) = tokio::join!(
+        {
+            let s = assignments.clone();
+            async move { s.unassign(a.id, admin_role, None).await }
+        },
+        {
+            let s = assignments.clone();
+            async move { s.unassign(b.id, admin_role, None).await }
+        },
+    );
+    assert_eq!(
+        [r1.is_ok(), r2.is_ok()].iter().filter(|ok| **ok).count(),
+        1,
+        "одно снятие проходит, второе упирается в последнего админа"
+    );
+    assert!(matches!(
+        users.delete(if r1.is_ok() { b.id } else { a.id }).await,
+        Err(AuthError::Validation(_))
+    ));
 }

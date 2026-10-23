@@ -7,7 +7,7 @@ use tracing::{Level, instrument};
 use super::{AuthContext, Ports};
 use crate::{
     AuthError, Result,
-    domain::{PermissionCode, ScopeId},
+    domain::{PermissionCode, PermissionId, ScopeId, UserId},
     ports::PermissionRepository,
 };
 
@@ -68,6 +68,48 @@ impl AccessService {
         } else {
             Err(AuthError::Forbidden)
         }
+    }
+
+    /// Нельзя выдать больше, чем имеешь сам: у `ctx` должны быть все `codes`
+    /// (глобально, а для `Some(scope)` — ещё и внутри этого scope). Иначе `Forbidden`.
+    pub async fn require_all<'a>(
+        &self,
+        ctx: &AuthContext,
+        codes: impl IntoIterator<Item = &'a PermissionCode>,
+        scope: Option<&ScopeId>,
+    ) -> Result<()> {
+        let granted = self
+            .permissions
+            .effective_for_user(ctx.user.id, scope)
+            .await?;
+        if codes.into_iter().all(|c| granted.contains(c)) {
+            Ok(())
+        } else {
+            Err(AuthError::Forbidden)
+        }
+    }
+
+    /// Коды прав по id. Неизвестные id пропускаются — их отвергнет адаптер (`Validation`).
+    pub async fn codes_of(&self, ids: &[PermissionId]) -> Result<Vec<PermissionCode>> {
+        Ok(self
+            .permissions
+            .list()
+            .await?
+            .into_iter()
+            .filter(|p| ids.contains(&p.id))
+            .map(|p| p.code)
+            .collect())
+    }
+
+    /// `actor` может управлять `target`, только если у target нет глобальных прав,
+    /// которых нет у actor. Иначе через сброс пароля можно войти под более сильным
+    /// пользователем (например, админом).
+    pub async fn require_covers_user(&self, actor: &AuthContext, target: UserId) -> Result<()> {
+        if actor.user.id == target {
+            return Ok(());
+        }
+        let target_perms = self.permissions.effective_for_user(target, None).await?;
+        self.require_all(actor, &target_perms, None).await
     }
 }
 

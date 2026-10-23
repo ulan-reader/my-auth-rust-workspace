@@ -5,10 +5,13 @@
 //! `hash_password(password)` (через getrandom), передавать её вручную не нужно;
 //! `verify_password` принимает готовую PHC-строку прямо как `&str`.
 
+use std::sync::Arc;
+
 use argon2::{Algorithm, Argon2, Params, PasswordHasher as _, PasswordVerifier, Version};
 use async_trait::async_trait;
 use auth_core::{AuthError, Result, domain::PasswordHash, ports::PasswordHasher};
 use secrecy::{ExposeSecret, SecretString};
+use tokio::sync::Semaphore;
 
 use crate::config::Argon2Config;
 
@@ -40,46 +43,71 @@ pub struct Argon2PasswordHasher {
     /// Посчитан один раз при старте — тем же Argon2, что и настоящие пароли,
     /// иначе время `verify_dummy` не совпадёт со временем реального `verify`.
     dummy_hash: PasswordHash,
+    /// Каждый хеш — `m_cost_kib` памяти и поток blocking-пула; без лимита
+    /// поток логинов с разных IP съедает всю память.
+    permits: Arc<Semaphore>,
 }
 
 impl Argon2PasswordHasher {
-    /// Сама Argon2-операция синхронная (без await), поэтому конструктор — обычная
-    /// sync-функция; async-рантайм для неё не нужен. Единственный побочный эффект —
-    /// на старте процесса один раз считается dummy-хеш (~то же время, что один логин).
     pub fn new(cfg: &Argon2Config) -> Result<Self> {
+        if cfg.max_concurrent == 0 {
+            return Err(AuthError::validation(
+                "crypto.argon2.max_concurrent должен быть > 0",
+            ));
+        }
         let argon2 = build_argon2(cfg)?;
         let dummy_hash = hash_blocking(&argon2, DUMMY_PASSWORD)?;
-        Ok(Self { argon2, dummy_hash })
+        Ok(Self {
+            argon2,
+            dummy_hash,
+            permits: Arc::new(Semaphore::new(cfg.max_concurrent)),
+        })
+    }
+
+    /// Ждёт свободный слот и считает `f` в blocking-пуле. Разрешение уезжает
+    /// внутрь задачи: слот освобождается, когда хеш реально досчитан, даже если
+    /// запрос уже отвалился по таймауту.
+    async fn run<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&Argon2<'static>) -> T + Send + 'static,
+    ) -> Result<T> {
+        let permit = self
+            .permits
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(AuthError::internal)?;
+        let argon2 = self.argon2.clone();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            f(&argon2)
+        })
+        .await
+        .map_err(AuthError::internal)
     }
 }
 
 #[async_trait]
 impl PasswordHasher for Argon2PasswordHasher {
     async fn hash(&self, password: &SecretString) -> Result<PasswordHash> {
-        let argon2 = self.argon2.clone();
         let password = password.expose_secret().to_owned();
-        tokio::task::spawn_blocking(move || hash_blocking(&argon2, &password))
-            .await
-            .map_err(AuthError::internal)?
+        self.run(move |a| hash_blocking(a, &password)).await?
     }
 
     async fn verify(&self, password: &SecretString, hash: &PasswordHash) -> Result<bool> {
-        let argon2 = self.argon2.clone();
         let password = password.expose_secret().to_owned();
         let hash = hash.as_str().to_owned();
-        tokio::task::spawn_blocking(move || verify_blocking(&argon2, &password, &hash))
-            .await
-            .map_err(AuthError::internal)?
+        self.run(move |a| verify_blocking(a, &password, &hash))
+            .await?
     }
 
     async fn verify_dummy(&self, password: &SecretString) {
-        let argon2 = self.argon2.clone();
         let password = password.expose_secret().to_owned();
         let hash = self.dummy_hash.as_str().to_owned();
-        // результат осознанно игнорируется — единственная цель здесь: потратить
-        // столько же времени, сколько потратил бы настоящий verify()
-        let _ =
-            tokio::task::spawn_blocking(move || verify_blocking(&argon2, &password, &hash)).await;
+        // результат не нужен — только потратить то же время, что настоящий verify()
+        let _ = self
+            .run(move |a| verify_blocking(a, &password, &hash))
+            .await;
     }
 }
 
@@ -93,6 +121,7 @@ mod tests {
             m_cost_kib: 8,
             t_cost: 1,
             p_cost: 1,
+            max_concurrent: 2,
         })
         .unwrap()
     }

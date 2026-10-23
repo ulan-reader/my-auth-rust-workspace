@@ -9,7 +9,7 @@ use auth_core::{
 use sqlx::PgPool;
 use tracing::instrument;
 
-use crate::error::map_db_error;
+use crate::{admin_guard, error::map_db_error};
 
 /// `''` <-> `None`: тот же сентинел, что в схеме — глобальное назначение хранится
 /// с пустой строкой вместо NULL (см. миграцию 0001_init.sql).
@@ -92,14 +92,19 @@ impl AssignmentRepository for PgAssignmentRepository {
 
     #[instrument(skip(self), err)]
     async fn unassign(&self, user: UserId, role: RoleId, scope: Option<&ScopeId>) -> Result<()> {
+        let mut tx = self.pool.begin().await.map_err(map_db_error)?;
+        let before = admin_guard::lock(&mut tx).await?;
+
         sqlx::query("delete from user_roles where user_id = $1 and role_id = $2 and scope = $3")
             .bind(user.0)
             .bind(role.0)
             .bind(scope_to_db(scope))
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(map_db_error)?;
-        Ok(())
+
+        admin_guard::ensure_remains(&mut tx, before).await?;
+        tx.commit().await.map_err(map_db_error)
     }
 
     #[instrument(skip(self), err)]

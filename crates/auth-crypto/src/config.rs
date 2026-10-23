@@ -1,6 +1,10 @@
 use secrecy::SecretString;
 use serde::Deserialize;
 
+fn default_max_concurrent() -> usize {
+    std::thread::available_parallelism().map_or(4, |n| n.get())
+}
+
 /// Параметры Argon2id. Дефолты — минимум по рекомендациям OWASP на 2024 год
 /// (19 MiB памяти, 2 итерации, 1 поток параллелизма).
 #[derive(Debug, Clone, Deserialize)]
@@ -9,6 +13,9 @@ pub struct Argon2Config {
     pub m_cost_kib: u32,
     pub t_cost: u32,
     pub p_cost: u32,
+    /// Сколько хешей считается одновременно; остальные ждут в очереди.
+    /// Пик памяти ≈ max_concurrent × m_cost_kib.
+    pub max_concurrent: usize,
 }
 
 impl Default for Argon2Config {
@@ -17,6 +24,7 @@ impl Default for Argon2Config {
             m_cost_kib: 19_456,
             t_cost: 2,
             p_cost: 1,
+            max_concurrent: default_max_concurrent(),
         }
     }
 }

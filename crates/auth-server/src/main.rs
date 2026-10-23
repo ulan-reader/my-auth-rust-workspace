@@ -1,36 +1,25 @@
 //! Composition root: читает конфиг, собирает адаптеры (postgres/crypto) за
-//! портами core, строит ApiState, поднимает axum и слушает до Ctrl+C.
-//! Подкоманда `bootstrap-admin` создаёт первого админа в обход проверки прав —
-//! иначе создать первого пользователя некому (POST /users сам требует админа).
+//! портами core, строит ApiState, поднимает axum и слушает до Ctrl+C / SIGTERM.
+//! Первый администратор создаётся через `POST /setup` (см. auth-api).
 
 mod config;
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, bail};
 use auth_api::ApiState;
-use auth_core::{
-    AuthError,
-    domain::{Email, RoleScope},
-    ports::{
-        NewRole, NewUser, PageRequest, PasswordHasher, RoleRepository, SessionRepository,
-        UserRepository,
-    },
-    service::Ports,
-};
+use auth_core::{ports::SessionRepository, service::Ports};
 use auth_crypto::{Argon2PasswordHasher, Jwks, JwtCodec, Sha256RefreshTokenProvider};
 use auth_postgres::{
     PgAssignmentRepository, PgPermissionRepository, PgPool, PgRoleRepository, PgSessionRepository,
-    PgSettingsRepository, PgUserRepository,
+    PgSettingsRepository, PgSetupRepository, PgUserRepository,
 };
 use axum::{Json, Router, http::StatusCode, routing::get};
 use chrono::{TimeDelta, Utc};
-use tokio::{sync::watch, time::MissedTickBehavior};
 use clap::{Parser, Subcommand};
 use config::AppConfig;
-use secrecy::SecretString;
-use std::time::Duration;
-use tokio::net::TcpListener;
+use secrecy::ExposeSecret;
+use tokio::{net::TcpListener, sync::watch, time::MissedTickBehavior};
 use tracing::info;
 
 #[derive(Parser)]
@@ -41,17 +30,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Создать (или обновить права) первого администратора.
-    BootstrapAdmin {
-        #[arg(long)]
-        email: String,
-        #[arg(long)]
-        password: String,
-        #[arg(long, default_value = "Admin")]
-        first_name: String,
-        #[arg(long, default_value = "User")]
-        second_name: String,
-    },
     /// Сгенерировать новую пару ключей Ed25519 для crypto.jwt.*.
     /// Ничего не пишет в БД/конфиг — значения нужно положить в .env/config вручную.
     JwtKeygen,
@@ -102,29 +80,6 @@ async fn main() -> anyhow::Result<()> {
     );
     let sessions = Arc::new(PgSessionRepository::new(pool.clone()));
 
-    if let Some(Command::BootstrapAdmin {
-        email,
-        password,
-        first_name,
-        second_name,
-    }) = cli.command
-    {
-        bootstrap_admin(
-            &users_repo,
-            &roles_repo,
-            &PgAssignmentRepository::new(pool.clone()),
-            &PgPermissionRepository::new(pool.clone()),
-            &hasher,
-            &email,
-            &password,
-            &first_name,
-            &second_name,
-        )
-        .await?;
-        println!("Готово: {email} теперь admin.");
-        return Ok(());
-    }
-
     let ports = Ports {
         users: Arc::new(users_repo),
         roles: Arc::new(roles_repo),
@@ -136,28 +91,22 @@ async fn main() -> anyhow::Result<()> {
         refresh_tokens: Arc::new(Sha256RefreshTokenProvider),
         clock: Arc::new(auth_core::ports::SystemClock),
         settings: Arc::new(PgSettingsRepository::new(pool.clone())),
+        setup: Arc::new(PgSetupRepository::new(pool.clone())),
     };
 
     let policy = cfg.auth.build().context("auth policy")?;
-    let state = ApiState::from_ports(&ports, policy);
+    if let Some(token) = &cfg.setup.token
+        && token.expose_secret().len() < 32
+    {
+        bail!("setup.token: минимум 32 символа");
+    }
+    let state = ApiState::from_ports(&ports, policy, cfg.setup.token.clone());
     let app = auth_api::router(state, &cfg.api)
         .context("конфиг api")?
         .merge(jwks_router(jwt_codec))
         .merge(health_router(pool.clone()));
 
-    let listener = TcpListener::bind(cfg.server.bind).await.context("bind")?;
-    info!(addr = %cfg.server.bind, "auth-server слушает");
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-        .with_graceful_shutdown(async move {
-            shutdown_signal().await;
-            let _ = shutdown_tx.send(true);
-        })
-        .await
-        .context("сервер упал")?;
-
+    // воркер — после проверки конфига, но до приёма запросов
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let cleanup = tokio::spawn(session_cleanup(
         sessions.clone(),
@@ -165,9 +114,21 @@ async fn main() -> anyhow::Result<()> {
         shutdown_rx,
     ));
 
+    let listener = TcpListener::bind(cfg.server.bind).await.context("bind")?;
+    info!(addr = %cfg.server.bind, "auth-server слушает");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        let _ = shutdown_tx.send(true);
+    })
+    .await
+    .context("сервер упал")?;
+
     let _ = cleanup.await;
     Ok(())
-
 }
 
 async fn session_cleanup(
@@ -175,8 +136,9 @@ async fn session_cleanup(
     cfg: config::MaintenanceConfig,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    let mut interval =
-        tokio::time::interval(Duration::from_secs(cfg.session_cleanup_interval_secs.max(1)));
+    let mut interval = tokio::time::interval(Duration::from_secs(
+        cfg.session_cleanup_interval_secs.max(1),
+    ));
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let retention = i64::try_from(cfg.session_retention_secs)
         .ok()
@@ -224,76 +186,6 @@ async fn shutdown_signal() {
         () = ctrl_c => info!("получен Ctrl+C, останавливаемся"),
         () = terminate => info!("получен SIGTERM, останавливаемся"),
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn bootstrap_admin(
-    users: &PgUserRepository,
-    roles: &PgRoleRepository,
-    assignments: &PgAssignmentRepository,
-    permissions: &PgPermissionRepository,
-    hasher: &Argon2PasswordHasher,
-    email: &str,
-    password: &str,
-    first_name: &str,
-    second_name: &str,
-) -> anyhow::Result<()> {
-    use auth_core::ports::{AssignmentRepository, PermissionRepository};
-
-    let admin_role = match roles
-        .create(&NewRole {
-            code: auth_core::domain::RoleCode::parse("admin")?,
-            name: "Admin".into(),
-            scope: RoleScope::Global,
-        })
-        .await
-    {
-        Ok(r) => r,
-        Err(AuthError::Conflict) => {
-            let page = roles
-                .list(&PageRequest::new(None, Some(100), Some("admin".into())))
-                .await?;
-            page.items
-                .into_iter()
-                .find(|r| r.code.as_str() == "admin")
-                .context("роль admin в конфликте, но не найдена")?
-        }
-        Err(e) => bail!(e),
-    };
-
-    let all_perms = permissions.list().await?;
-    let all_ids: Vec<_> = all_perms.iter().map(|p| p.id).collect();
-    roles.set_permissions(admin_role.id, &all_ids).await?;
-
-    let hash = hasher
-        .hash(&SecretString::from(password.to_owned()))
-        .await?;
-    let user = match users
-        .create(&NewUser {
-            email: Email::parse(email)?,
-            password_hash: hash,
-            first_name: first_name.to_owned(),
-            second_name: second_name.to_owned(),
-        })
-        .await
-    {
-        Ok(u) => u,
-        Err(AuthError::Conflict) => {
-            users
-                .find_credentials_by_email(&Email::parse(email)?)
-                .await?
-                .context("email в конфликте, но не найден")?
-                .user
-        }
-        Err(e) => bail!(e),
-    };
-
-    match assignments.assign(user.id, admin_role.id, None).await {
-        Ok(()) | Err(AuthError::Conflict) => {}
-        Err(e) => bail!(e),
-    }
-
-    Ok(())
 }
 
 /// Публикация публичных ключей проверки JWT — отдельно от `auth_api::router`,

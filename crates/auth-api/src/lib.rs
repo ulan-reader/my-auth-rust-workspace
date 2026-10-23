@@ -13,7 +13,8 @@ use std::time::Duration;
 use auth_core::{
     ports::PermissionRepository,
     service::{
-        AccessService, AuthPolicy, AuthService, Ports, RoleService, SettingsService, UserService,
+        AccessService, AuthPolicy, AuthService, Ports, RoleService, SettingsService, SetupService,
+        UserService,
     },
 };
 use axum::{
@@ -21,6 +22,7 @@ use axum::{
     http::{HeaderValue, Method, header},
 };
 use rate_limit::RateLimitConfig;
+use secrecy::SecretString;
 use tower_http::{cors::CorsLayer, timeout::TimeoutLayer, trace::TraceLayer};
 use tracing::warn;
 
@@ -32,10 +34,15 @@ pub struct ApiState {
     pub access: AccessService,
     pub permissions: Arc<dyn PermissionRepository>,
     pub settings: SettingsService,
+    pub setup: SetupService,
 }
 
 impl ApiState {
-    pub fn from_ports(ports: &Ports, policy: AuthPolicy) -> Self {
+    pub fn from_ports(
+        ports: &Ports,
+        policy: AuthPolicy,
+        setup_token: Option<SecretString>,
+    ) -> Self {
         Self {
             auth: AuthService::from_ports(ports, policy),
             users: UserService::from_ports(ports),
@@ -43,6 +50,7 @@ impl ApiState {
             access: AccessService::from_ports(ports),
             permissions: ports.permissions.clone(),
             settings: SettingsService::from_ports(ports),
+            setup: SetupService::from_ports(ports, setup_token),
         }
     }
 }
@@ -119,11 +127,12 @@ fn build_cors(origins: &[String]) -> Result<CorsLayer, ConfigError> {
 pub fn router(state: ApiState, cfg: &ApiConfig) -> Result<Router, ConfigError> {
     let governor = rate_limit::build(&cfg.rate_limit)?;
     Ok(Router::new()
-        .nest("/auth", routes::auth::router(governor))
         .nest("/users", routes::users::router())
         .nest("/roles", routes::roles::router())
         .nest("/permissions", routes::roles::permissions_router())
         .nest("/settings", routes::settings::router())
+        .nest("/auth", routes::auth::router(governor.clone()))
+        .nest("/setup", routes::setup::router(governor))
         .with_state(state)
         .layer(TraceLayer::new_for_http())
         .layer(TimeoutLayer::with_status_code(

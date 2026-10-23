@@ -41,7 +41,7 @@ pub struct UserWithRoles {
     pub roles: Vec<RoleAssignment>,
 }
 
-fn validate_password(password: &SecretString) -> Result<()> {
+pub(super) fn validate_password(password: &SecretString) -> Result<()> {
     let len = password.expose_secret().chars().count();
     if (MIN_PASSWORD_CHARS..=MAX_PASSWORD_CHARS).contains(&len) {
         Ok(())
@@ -52,7 +52,7 @@ fn validate_password(password: &SecretString) -> Result<()> {
     }
 }
 
-fn clean_name(raw: &str, field: &str) -> Result<String> {
+pub(super) fn clean_name(raw: &str, field: &str) -> Result<String> {
     let name = raw.trim();
     if name.chars().count() > MAX_NAME_CHARS {
         return Err(AuthError::validation(format!(
@@ -168,6 +168,7 @@ impl UserService {
         self.access
             .require_permission(actor, perm::USERS_MANAGE, None)
             .await?;
+        self.access.require_covers_user(actor, id).await?;
 
         let upd = UserUpdate {
             email: Email::parse(&input.email)?,
@@ -191,6 +192,7 @@ impl UserService {
         self.access
             .require_permission(actor, perm::USERS_MANAGE, None)
             .await?;
+        self.access.require_covers_user(actor, id).await?;
 
         validate_password(password)?;
         let hash = self.hasher.hash(password).await?;
@@ -208,6 +210,7 @@ impl UserService {
         self.access
             .require_permission(actor, perm::USERS_MANAGE, None)
             .await?;
+        self.access.require_covers_user(actor, id).await?;
 
         if actor.user_id() == id && !active {
             return Err(AuthError::validation("нельзя деактивировать самого себя"));
@@ -230,6 +233,7 @@ impl UserService {
         self.access
             .require_permission(actor, perm::USERS_MANAGE, None)
             .await?;
+        self.access.require_covers_user(actor, id).await?;
 
         if actor.user_id() == id {
             return Err(AuthError::validation("нельзя удалить самого себя"));

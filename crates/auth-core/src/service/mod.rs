@@ -4,19 +4,22 @@ mod access;
 mod auth;
 mod roles;
 mod settings;
+mod setup;
 mod users;
 
 use std::sync::Arc;
 
 use crate::ports::{
     AccessTokenCodec, AssignmentRepository, Clock, PasswordHasher, PermissionRepository,
-    RefreshTokenProvider, RoleRepository, SessionRepository, SettingsRepository, UserRepository,
+    RefreshTokenProvider, RoleRepository, SessionRepository, SettingsRepository, SetupRepository,
+    UserRepository,
 };
 
 pub use access::{AccessService, admin_permissions};
 pub use auth::{AuthContext, AuthPolicy, AuthService, LoginResult, RegisterInput, TokenPair};
 pub use roles::{AssignRole, CreateRole, RoleService, UpdateRole};
 pub use settings::SettingsService;
+pub use setup::{SetupInput, SetupService};
 pub use users::{CreateUser, UpdateUser, UserService, UserWithRoles};
 
 /// Все порты разом. Собирается один раз в composition root (auth-server)
@@ -33,4 +36,5 @@ pub struct Ports {
     pub refresh_tokens: Arc<dyn RefreshTokenProvider>,
     pub clock: Arc<dyn Clock>,
     pub settings: Arc<dyn SettingsRepository>,
+    pub setup: Arc<dyn SetupRepository>,
 }

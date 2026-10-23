@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{AuthError, Result};
 
+/// Код системной роли администратора: её нельзя удалить, переименовать или
+/// урезать по правам — иначе систему можно оставить без админа.
+pub const ADMIN_ROLE_CODE: &str = "admin";
+
 // ============ ID-newtype'ы: RoleId нельзя случайно передать вместо UserId ============
 
 macro_rules! id_type {

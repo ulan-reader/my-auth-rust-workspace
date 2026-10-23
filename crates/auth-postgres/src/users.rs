@@ -7,11 +7,11 @@ use auth_core::{
 use sqlx::PgPool;
 use tracing::instrument;
 
-use crate::error::map_db_error;
+use crate::{admin_guard, error::map_db_error};
 
 #[derive(sqlx::FromRow)]
-struct UserRow {
-    id: i64,
+pub(crate) struct UserRow {
+    pub(crate) id: i64,
     email: String,
     password_hash: String,
     first_name: String,
@@ -23,7 +23,7 @@ impl UserRow {
     /// Данные из БД уже должны быть валидны (пишем их сами через `Email::parse`
     /// на входе), поэтому ошибка парсинга здесь — признак повреждения данных,
     /// а не пользовательская ошибка: `Internal`, не `Validation`.
-    fn into_user(self) -> Result<User> {
+    pub(crate) fn into_user(self) -> Result<User> {
         Ok(User {
             id: UserId(self.id),
             email: Email::parse(&self.email).map_err(AuthError::internal)?,
@@ -168,29 +168,39 @@ impl UserRepository for PgUserRepository {
 
     #[instrument(skip(self), err)]
     async fn set_active(&self, id: UserId, active: bool) -> Result<()> {
+        let mut tx = self.pool.begin().await.map_err(map_db_error)?;
+        let before = admin_guard::lock(&mut tx).await?;
+
         let result = sqlx::query("update users set is_active = $1 where id = $2")
             .bind(active)
             .bind(id.0)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(map_db_error)?;
         if result.rows_affected() == 0 {
             return Err(AuthError::NotFound);
         }
-        Ok(())
+
+        admin_guard::ensure_remains(&mut tx, before).await?;
+        tx.commit().await.map_err(map_db_error)
     }
 
     #[instrument(skip(self), err)]
     async fn delete(&self, id: UserId) -> Result<()> {
+        let mut tx = self.pool.begin().await.map_err(map_db_error)?;
+        let before = admin_guard::lock(&mut tx).await?;
+
         // user_roles и sessions удаляются каскадом (ON DELETE CASCADE в миграции)
         let result = sqlx::query("delete from users where id = $1")
             .bind(id.0)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(map_db_error)?;
         if result.rows_affected() == 0 {
             return Err(AuthError::NotFound);
         }
-        Ok(())
+
+        admin_guard::ensure_remains(&mut tx, before).await?;
+        tx.commit().await.map_err(map_db_error)
     }
 }
