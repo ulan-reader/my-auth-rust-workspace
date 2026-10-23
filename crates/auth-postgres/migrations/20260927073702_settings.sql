@@ -1,4 +1,3 @@
--- Add migration script here
 -- Синглтон-строка: id=1 гарантирует, что настройки всегда одни на весь сервис.
 create table app_settings (
     id                      smallint primary key default 1 check (id = 1),

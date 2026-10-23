@@ -21,3 +21,4 @@ secrecy.workspace = true
 tower_governor = "0.8"
 governor = "0.10"
 tracing-opentelemetry.workspace = true
+tokio = { workspace = true, features = ["rt", "time"] }

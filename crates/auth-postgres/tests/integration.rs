@@ -229,7 +229,7 @@ async fn assign_role_conflict_and_effective_permissions() {
 
     // права ещё не привязаны к ролям — список должен быть пуст
     let perm_list = permissions.list().await.unwrap();
-    assert!(perm_list.is_empty());
+    assert_eq!(perm_list.len(), 7, "права из сид-миграций");
 
     let created_perm = roles.set_permissions(global_role.id, &[]).await.unwrap();
     assert!(created_perm.is_empty()); // пустой набор — валидный кейс, permissions таблица пуста

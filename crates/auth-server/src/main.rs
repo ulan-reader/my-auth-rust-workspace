@@ -24,7 +24,8 @@ use auth_postgres::{
     PgSettingsRepository, PgUserRepository,
 };
 use axum::{Json, Router, http::StatusCode, routing::get};
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{TimeDelta, Utc};
+use tokio::{sync::watch, time::MissedTickBehavior};
 use clap::{Parser, Subcommand};
 use config::AppConfig;
 use secrecy::SecretString;
@@ -137,51 +138,92 @@ async fn main() -> anyhow::Result<()> {
         settings: Arc::new(PgSettingsRepository::new(pool.clone())),
     };
 
-    let cleanup_interval =
-        Duration::from_secs(cfg.maintenance.session_cleanup_interval_secs.max(1));
-
-    let retention_secs = i64::try_from(cfg.maintenance.session_retention_secs).unwrap_or(i64::MAX);
-
-    let sessions_for_cleanup = sessions.clone();
-
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(cleanup_interval);
-
-        interval.tick().await;
-
-        loop {
-            interval.tick().await;
-
-            let before = Utc::now() - ChronoDuration::seconds(retention_secs);
-
-            match sessions_for_cleanup.purge_stale(before).await {
-                Ok(deleted) => {
-                    tracing::info!(deleted, "Очистка устаревших сессий завершена");
-                }
-                Err(error) => {
-                    tracing::error!(
-                        error = %error,
-                        "Не удалось очистить устаревшие сессии"
-                    );
-                }
-            }
-        }
-    });
-
     let policy = cfg.auth.build().context("auth policy")?;
     let state = ApiState::from_ports(&ports, policy);
     let app = auth_api::router(state, &cfg.api)
+        .context("конфиг api")?
         .merge(jwks_router(jwt_codec))
         .merge(health_router(pool.clone()));
 
     let listener = TcpListener::bind(cfg.server.bind).await.context("bind")?;
     info!(addr = %cfg.server.bind, "auth-server слушает");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            let _ = shutdown_tx.send(true);
+        })
         .await
         .context("сервер упал")?;
 
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let cleanup = tokio::spawn(session_cleanup(
+        sessions.clone(),
+        cfg.maintenance.clone(),
+        shutdown_rx,
+    ));
+
+    let _ = cleanup.await;
     Ok(())
+
+}
+
+async fn session_cleanup(
+    sessions: Arc<PgSessionRepository>,
+    cfg: config::MaintenanceConfig,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let mut interval =
+        tokio::time::interval(Duration::from_secs(cfg.session_cleanup_interval_secs.max(1)));
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let retention = i64::try_from(cfg.session_retention_secs)
+        .ok()
+        .and_then(TimeDelta::try_seconds)
+        .unwrap_or(TimeDelta::MAX);
+
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {}   // первый тик сразу — чистим и на старте
+            _ = shutdown.changed() => break,
+        }
+        let Some(before) = Utc::now().checked_sub_signed(retention) else {
+            continue; // retention длиннее эпохи — удалять нечего
+        };
+        match sessions.purge_stale(before).await {
+            Ok(deleted) => info!(deleted, "очистка устаревших сессий завершена"),
+            Err(error) => tracing::error!(%error, "не удалось очистить устаревшие сессии"),
+        }
+    }
+    info!("воркер очистки сессий остановлен");
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(error) => {
+                tracing::error!(%error, "не удалось подписаться на SIGTERM");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => info!("получен Ctrl+C, останавливаемся"),
+        () = terminate => info!("получен SIGTERM, останавливаемся"),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -252,11 +294,6 @@ async fn bootstrap_admin(
     }
 
     Ok(())
-}
-
-async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
-    tracing::info!("получен Ctrl+C, останавливаемся");
 }
 
 /// Публикация публичных ключей проверки JWT — отдельно от `auth_api::router`,

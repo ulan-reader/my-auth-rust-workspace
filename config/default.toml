@@ -6,6 +6,7 @@ request_timeout_secs = 15
 allowed_origins = []
 
 [api.rate_limit]
+trusted_proxies = []
 per_second = 2
 burst_size = 5
 

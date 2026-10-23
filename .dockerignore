@@ -1,0 +1,8 @@
+target
+.git
+.env
+.env.*
+!.env.example
+apps
+crates.zip
+deps-info.txt

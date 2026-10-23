@@ -1,0 +1,14 @@
+# Локальная разработка (AUTH_ENV=dev — значение по умолчанию).
+# Поверх config/default.toml; секреты — только в .env.
+
+[api]
+# admin-ui: `trunk serve` в apps/admin-ui
+allowed_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
+
+[api.rate_limit]
+# локально часто логинимся руками — не упираться в лимит
+per_second = 1
+burst_size = 20
+
+[telemetry]
+log_level = "info,auth_core=debug,auth_api=debug,auth_server=debug"

@@ -237,6 +237,12 @@ impl UserService {
         self.users.delete(id).await
     }
 
+    /// Профиль текущего пользователя. Без проверки прав: свои роли видит каждый.
+    #[instrument(skip_all, fields(actor = %ctx.user_id()), err(level = Level::WARN))]
+    pub async fn me(&self, ctx: &AuthContext) -> Result<UserWithRoles> {
+        self.with_roles(ctx.user.clone()).await
+    }
+
     async fn with_roles(&self, user: User) -> Result<UserWithRoles> {
         let mut map = self.assignments.for_users(&[user.id]).await?;
         let roles = map.remove(&user.id).unwrap_or_default();

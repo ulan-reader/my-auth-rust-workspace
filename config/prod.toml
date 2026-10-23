@@ -1,0 +1,37 @@
+# Прод (AUTH_ENV=prod — выставлен в прод-образе, см. Dockerfile).
+# Поверх config/default.toml. Секреты (AUTH__POSTGRES__URL, AUTH__CRYPTO__JWT__*)
+# — только через окружение, не в этот файл.
+#
+# Перед выкладкой заполнить:
+#   api.allowed_origins          — домен админки, например "https://admin.example.com"
+#   api.rate_limit.trusted_proxies — IP reverse-proxy (nginx/Caddy), если он есть
+#   telemetry.otlp_endpoint      — адрес коллектора/Jaeger в проде
+# Любое из них можно переопределить и через env, например
+#   AUTH__TELEMETRY__OTLP_ENDPOINT=http://jaeger:4318
+
+[server]
+bind = "0.0.0.0:8080"
+
+[api]
+request_timeout_secs = 15
+# пусто — браузерные кросс-доменные запросы запрещены (безопасный дефолт)
+allowed_origins = []
+
+[api.rate_limit]
+# пусто — X-Forwarded-For игнорируется, лимит по IP соединения
+trusted_proxies = []
+per_second = 2
+burst_size = 5
+
+[postgres]
+max_connections = 20
+min_connections = 2
+acquire_timeout_secs = 5
+
+[telemetry]
+enabled = true
+service_name = "auth-service"
+otlp_endpoint = "http://jaeger:4318"
+# 10% трасс — достаточно для картины нагрузки, не забивает хранилище
+sample_ratio = 0.1
+log_level = "info"

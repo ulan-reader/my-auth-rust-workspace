@@ -16,7 +16,10 @@ use auth_core::{
         AccessService, AuthPolicy, AuthService, Ports, RoleService, SettingsService, UserService,
     },
 };
-use axum::{Router, http::HeaderValue};
+use axum::{
+    Router,
+    http::{HeaderValue, Method, header},
+};
 use rate_limit::RateLimitConfig;
 use tower_http::{cors::CorsLayer, timeout::TimeoutLayer, trace::TraceLayer};
 use tracing::warn;
@@ -64,32 +67,59 @@ impl Default for ApiConfig {
     }
 }
 
-fn build_cors(origins: &[String]) -> CorsLayer {
-    if origins.is_empty() {
-        warn!(
-            "api.allowed_origins пуст — CORS открыт для всех источников, это ок только для локальной разработки"
-        );
-        return CorsLayer::permissive();
+/// Ошибка конфигурации API: сервер не должен стартовать с ней.
+#[derive(Debug)]
+pub struct ConfigError(pub String);
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
     }
-    let parsed: Vec<HeaderValue> = origins
-        .iter()
-        .filter_map(|o| match o.parse() {
-            Ok(v) => Some(v),
-            Err(_) => {
-                warn!(origin = %o, "невалидный origin в api.allowed_origins, пропущен");
-                None
-            }
-        })
-        .collect();
-    CorsLayer::new()
-        .allow_origin(parsed)
-        .allow_methods(tower_http::cors::Any)
-        .allow_headers(tower_http::cors::Any)
 }
 
-pub fn router(state: ApiState, cfg: &ApiConfig) -> Router {
-    Router::new()
-        .nest("/auth", routes::auth::router(&cfg.rate_limit))
+impl std::error::Error for ConfigError {}
+
+/// Только `http(s)://хост[:порт]`: без пути, '*', query и пробелов.
+fn parse_origin(raw: &str) -> Result<HeaderValue, ConfigError> {
+    let origin = raw.trim();
+    let invalid = |why: &str| ConfigError(format!("api.allowed_origins: {origin:?} — {why}"));
+    let host = origin
+        .strip_prefix("https://")
+        .or_else(|| origin.strip_prefix("http://"))
+        .ok_or_else(|| invalid("нужна схема http:// или https://"))?;
+    if host.is_empty() || host.contains(['/', '*', '?', '#', ' ']) {
+        return Err(invalid("только схема://хост[:порт], без пути и '*'"));
+    }
+    HeaderValue::from_str(origin).map_err(|_| invalid("недопустимые символы"))
+}
+
+fn build_cors(origins: &[String]) -> Result<CorsLayer, ConfigError> {
+    if origins.is_empty() {
+        // без allow_origin браузер блокирует любые кросс-доменные запросы
+        warn!("api.allowed_origins пуст — кросс-доменные запросы из браузера запрещены");
+        return Ok(CorsLayer::new());
+    }
+    let parsed = origins
+        .iter()
+        .map(|o| parse_origin(o))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(CorsLayer::new()
+        .allow_origin(parsed)
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+        ])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
+        .max_age(Duration::from_secs(600)))
+}
+
+pub fn router(state: ApiState, cfg: &ApiConfig) -> Result<Router, ConfigError> {
+    let governor = rate_limit::build(&cfg.rate_limit)?;
+    Ok(Router::new()
+        .nest("/auth", routes::auth::router(governor))
         .nest("/users", routes::users::router())
         .nest("/roles", routes::roles::router())
         .nest("/permissions", routes::roles::permissions_router())
@@ -100,5 +130,5 @@ pub fn router(state: ApiState, cfg: &ApiConfig) -> Router {
             axum::http::StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(cfg.request_timeout_secs),
         ))
-        .layer(build_cors(&cfg.allowed_origins))
+        .layer(build_cors(&cfg.allowed_origins)?))
 }

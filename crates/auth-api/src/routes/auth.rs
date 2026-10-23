@@ -50,9 +50,9 @@ pub struct RefreshRequest {
 async fn refresh(
     State(state): State<ApiState>,
     Json(req): Json<RefreshRequest>,
-) -> Result<(), ApiError> {
-    state.auth.refresh(&req.refresh_token).await?;
-    Ok(())
+) -> Result<Json<TokenPairDto>, ApiError> {
+    let tokens = state.auth.refresh(&req.refresh_token).await?;
+    Ok(Json(tokens.into()))
 }
 
 async fn logout(
@@ -94,27 +94,19 @@ async fn change_password(
     }))
 }
 
-async fn me(AuthCtx(ctx): AuthCtx) -> Json<crate::dto::UserDto> {
-    Json(
-        auth_core::service::UserWithRoles {
-            user: ctx.user,
-            roles: Vec::new(),
-        }
-        .into(),
-    )
+async fn me(
+    State(state): State<ApiState>,
+    AuthCtx(ctx): AuthCtx,
+) -> Result<Json<crate::dto::UserDto>, ApiError> {
+    Ok(Json(state.users.me(&ctx).await?.into()))
 }
 
-// подавляем неиспользуемый импорт AuthError в некоторых конфигурациях компилятора
-/// `/login` и `/register` — под rate-limit (перебор пароля/спам-регистрации).
-/// Остальное — обычный аутентифицированный трафик, лимитировать незачем.
-pub fn router(rate_limit: &crate::rate_limit::RateLimitConfig) -> Router<ApiState> {
+pub fn router(governor: std::sync::Arc<crate::rate_limit::Governor>) -> Router<ApiState> {
     let limited = Router::new()
         .route("/login", post(login))
         .route("/register", post(register))
         .route("/me/password", post(change_password))
-        .layer(tower_governor::GovernorLayer::new(
-            crate::rate_limit::build(rate_limit),
-        ));
+        .layer(tower_governor::GovernorLayer::new(governor));
 
     let rest = Router::new()
         .route("/refresh", post(refresh))

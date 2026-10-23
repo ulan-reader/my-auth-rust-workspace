@@ -1,5 +1,8 @@
 /target
 
+# Сборка admin-ui (trunk build)
+apps/admin-ui/dist/
+
 # Environment variables and secrets
 .env
 .env.*

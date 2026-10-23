@@ -12,7 +12,7 @@ auth-postgres.workspace = true
 auth-api.workspace = true
 auth-crypto.workspace = true
 auth-telemetry.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "net"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "net", "sync", "time"] }
 axum.workspace = true
 serde.workspace = true
 anyhow.workspace = true

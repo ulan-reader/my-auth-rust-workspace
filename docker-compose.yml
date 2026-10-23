@@ -1,3 +1,16 @@
+# Только инфраструктура (Postgres + Jaeger), сервер — через cargo на хосте:
+#   docker compose up -d
+# Разработка в Docker, сервер сам пересобирается при сохранении файлов:
+#   docker compose --profile dev up
+# Прод-образ:
+#   docker compose --profile prod up -d --build
+
+x-auth-env: &auth-env
+  # перекрывают значения из .env: внутри сети compose другие хосты
+  AUTH__POSTGRES__URL: postgres://postgres:postgres@postgres:5432/auth
+  AUTH__TELEMETRY__OTLP_ENDPOINT: http://jaeger:4318
+  AUTH__SERVER__BIND: 0.0.0.0:8080
+
 services:
   postgres:
     image: postgres:17
@@ -14,10 +27,16 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d auth"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
     restart: unless-stopped
 
   jaeger:
-    image: jaegertracing/jaeger:latest
+    image: jaegertracing/jaeger:2.22.0
     container_name: jaeger
 
     ports:
@@ -27,5 +46,46 @@ services:
 
     restart: unless-stopped
 
+  auth-dev:
+    profiles: [dev]
+    build:
+      context: .
+      target: dev
+    env_file:
+      - path: .env
+        required: false
+    environment: *auth-env
+    ports:
+      - "8080:8080"
+    volumes:
+      - .:/app
+      - cargo_registry:/usr/local/cargo/registry
+      - cargo_target:/target
+    depends_on:
+      postgres:
+        condition: service_healthy
+    init: true
+
+  auth:
+    profiles: [prod]
+    build:
+      context: .
+      target: runtime
+    image: auth-server:latest
+    env_file:
+      - path: .env
+        required: false
+    environment: *auth-env
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # сервер ловит только Ctrl+C; init пробрасывает SIGTERM от `docker stop`
+    init: true
+    restart: unless-stopped
+
 volumes:
   postgres_data:
+  cargo_registry:
+  cargo_target:
