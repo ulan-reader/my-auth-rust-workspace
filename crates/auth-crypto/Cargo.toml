@@ -21,7 +21,7 @@ tracing.workspace = true
 tokio = { workspace = true, features = ["rt", "macros", "sync"] }
 argon2.workspace = true
 # нужен crypto-backend (rust_crypto или aws_lc_rs) — см. `cargo info jsonwebtoken`
-jsonwebtoken = { workspace = true, features = ["rust_crypto"] }
+jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs"] }
 # для EdDSA: генерация ключей и PKCS8-обёртка приватного ключа под jsonwebtoken::EncodingKey
 ed25519-dalek.workspace = true
 sha2.workspace = true
