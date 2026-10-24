@@ -7,7 +7,7 @@
 #             (cargo-chef), поэтому правка своего кода пересобирает только
 #             крейты workspace, а не весь граф зависимостей.
 
-ARG RUST_VERSION=1.96
+ARG RUST_VERSION=1.98
 
 # ---------- база: rust + cargo-chef ----------
 FROM rust:${RUST_VERSION}-slim-bookworm AS chef
