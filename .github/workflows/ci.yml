@@ -16,7 +16,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   # та же версия, что в Dockerfile (ARG RUST_VERSION)
-  RUST_VERSION: "1.96"
+  RUST_VERSION: "1.98"
 
 jobs:
   lint:
