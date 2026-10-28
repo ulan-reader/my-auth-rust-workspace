@@ -9,6 +9,7 @@ mod roles;
 mod sessions;
 mod settings;
 mod setup;
+mod tx;
 mod users;
 
 pub use assignments::PgAssignmentRepository;
@@ -18,8 +19,8 @@ pub use roles::PgRoleRepository;
 pub use sessions::PgSessionRepository;
 pub use settings::PgSettingsRepository;
 pub use setup::PgSetupRepository;
-pub use users::PgUserRepository;
-
 /// Реэкспорт, чтобы `auth-server` не тащил `sqlx` явной зависимостью только
 /// для аннотации типа (например, в сигнатуре health-check функции).
 pub use sqlx::PgPool;
+pub use tx::PgUnitOfWork;
+pub use users::PgUserRepository;

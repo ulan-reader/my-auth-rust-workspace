@@ -14,6 +14,20 @@ use secrecy::SecretString;
 
 use crate::{Result, domain::*};
 
+// Добавляю транкзацию
+use std::any::Any;
+
+#[async_trait]
+pub trait Tx: Send {
+    fn as_any_mut(&mut self) -> &mut dyn Any; // нужно, чтобы адаптер мог «скастить»
+    async fn commit(self: Box<Self>) -> Result<()>;
+}
+
+#[async_trait]
+pub trait UnitOfWork: Send + Sync {
+    async fn begin(&self) -> Result<Box<dyn Tx>>;
+}
+
 // ===================== ДАННЫЕ, КОТОРЫЕ ХОДЯТ ЧЕРЕЗ ПОРТЫ =====================
 
 pub const DEFAULT_PER_PAGE: i64 = 20;
@@ -147,21 +161,26 @@ pub trait UserRepository: Send + Sync {
     async fn list(&self, req: &PageRequest) -> Result<Page<User>>;
 
     /// `Conflict`, если email уже занят.
-    async fn create(&self, new: &NewUser) -> Result<User>;
+    async fn create(&self, tx: &mut dyn Tx, new: &NewUser) -> Result<User>;
 
     /// `NotFound` / `Conflict` (email занят другим).
-    async fn update(&self, id: UserId, upd: &UserUpdate) -> Result<User>;
+    async fn update(&self, tx: &mut dyn Tx, id: UserId, upd: &UserUpdate) -> Result<User>;
 
-    async fn set_password_hash(&self, id: UserId, hash: &PasswordHash) -> Result<()>;
+    async fn set_password_hash(
+        &self,
+        tx: &mut dyn Tx,
+        id: UserId,
+        hash: &PasswordHash,
+    ) -> Result<()>;
 
     /// Не может оставить систему без активного администратора: если до операции
     /// админ был, а после не осталось ни одного — `Validation`, изменения откатываются.
-    async fn set_active(&self, id: UserId, active: bool) -> Result<()>;
+    async fn set_active(&self, tx: &mut dyn Tx, id: UserId, active: bool) -> Result<()>;
 
     /// Атомарно вместе с назначениями ролей и сессиями пользователя.
     /// Не может оставить систему без активного администратора: если до операции
     /// админ был, а после не осталось ни одного — `Validation`, изменения откатываются.
-    async fn delete(&self, id: UserId) -> Result<()>;
+    async fn delete(&self, tx: &mut dyn Tx, id: UserId) -> Result<()>;
 }
 
 #[async_trait]
@@ -171,18 +190,19 @@ pub trait RoleRepository: Send + Sync {
     async fn list(&self, req: &PageRequest) -> Result<Page<Role>>;
 
     /// `Conflict`, если код занят.
-    async fn create(&self, new: &NewRole) -> Result<Role>;
+    async fn create(&self, tx: &mut dyn Tx, new: &NewRole) -> Result<Role>;
 
-    async fn update(&self, id: RoleId, upd: &RoleUpdate) -> Result<Role>;
+    async fn update(&self, tx: &mut dyn Tx, id: RoleId, upd: &RoleUpdate) -> Result<Role>;
 
     /// Атомарно вместе с назначениями и правами роли.
-    async fn delete(&self, id: RoleId) -> Result<()>;
+    async fn delete(&self, tx: &mut dyn Tx, id: RoleId) -> Result<()>;
 
     async fn permissions_of(&self, role: RoleId) -> Result<Vec<Permission>>;
 
     /// Атомарно заменяет набор прав роли. Неизвестный `PermissionId` -> `Validation`.
     async fn set_permissions(
         &self,
+        tx: &mut dyn Tx,
         role: RoleId,
         permissions: &[PermissionId],
     ) -> Result<Vec<Permission>>;
@@ -195,16 +215,28 @@ pub trait AssignmentRepository: Send + Sync {
 
     /// Соответствие роли и scope (`check_assignment`) проверяет сервис, не адаптер.
     /// `Conflict`, если такая связка уже есть.
-    async fn assign(&self, user: UserId, role: RoleId, scope: Option<&ScopeId>) -> Result<()>;
+    async fn assign(
+        &self,
+        tx: &mut dyn Tx,
+        user: UserId,
+        role: RoleId,
+        scope: Option<&ScopeId>,
+    ) -> Result<()>;
 
     /// Идемпотентно: отсутствие назначения — не ошибка.
     /// Не может оставить систему без активного администратора: если до операции
     /// админ был, а после не осталось ни одного — `Validation`, изменения откатываются.
-    async fn unassign(&self, user: UserId, role: RoleId, scope: Option<&ScopeId>) -> Result<()>;
+    async fn unassign(
+        &self,
+        tx: &mut dyn Tx,
+        user: UserId,
+        role: RoleId,
+        scope: Option<&ScopeId>,
+    ) -> Result<()>;
 
     /// Снять все назначения внутри scope. Вызывает проект, когда удаляет
     /// у себя сущность (отдел, проект), чтобы не оставлять висящие права.
-    async fn revoke_all_in_scope(&self, scope: &ScopeId) -> Result<u64>;
+    async fn revoke_all_in_scope(&self, tx: &mut dyn Tx, scope: &ScopeId) -> Result<u64>;
 }
 
 #[async_trait]
@@ -224,7 +256,7 @@ pub trait PermissionRepository: Send + Sync {
 
 #[async_trait]
 pub trait SessionRepository: Send + Sync {
-    async fn create(&self, new: &NewSession) -> Result<Session>;
+    async fn create(&self, tx: &mut dyn Tx, new: &NewSession) -> Result<Session>;
 
     /// Для проверки access-токена: сессия жива? Ходит в БД на каждый запрос;
     /// если станет узким местом, кэш прячем за этим же портом.
@@ -240,26 +272,39 @@ pub trait SessionRepository: Send + Sync {
     /// Если `old` уже отозвана (гонка, двойное использование) -> `Conflict`.
     async fn rotate(
         &self,
+        tx: &mut dyn Tx,
         old: SessionId,
         next: &NewSession,
         now: DateTime<Utc>,
     ) -> Result<Session>;
 
     /// `NotFound`, если сессии нет или она принадлежит другому пользователю.
-    async fn revoke(&self, user: UserId, session: SessionId, now: DateTime<Utc>) -> Result<()>;
+    async fn revoke(
+        &self,
+        tx: &mut dyn Tx,
+        user: UserId,
+        session: SessionId,
+        now: DateTime<Utc>,
+    ) -> Result<()>;
 
     /// Возвращает, сколько сессий отозвано.
-    async fn revoke_all_for_user(&self, user: UserId, now: DateTime<Utc>) -> Result<u64>;
+    async fn revoke_all_for_user(
+        &self,
+        tx: &mut dyn Tx,
+        user: UserId,
+        now: DateTime<Utc>,
+    ) -> Result<u64>;
 
     /// Удаляет мёртвые сессии (просроченные или отозванные до `before`) — обслуживающая
     /// операция для периодической чистки, а не бизнес-правило. Возвращает, сколько удалено.
-    async fn purge_stale(&self, before: DateTime<Utc>) -> Result<u64>;
+    async fn purge_stale(&self, tx: &mut dyn Tx, before: DateTime<Utc>) -> Result<u64>;
 
     /// То же самое, но без `except` — для самостоятельной смены пароля:
     /// сессия, которой вызывающий пользуется прямо сейчас, должна пережить вызов,
     /// иначе он тут же вылетит из-под себя на середине запроса.
     async fn revoke_all_for_user_except(
         &self,
+        tx: &mut dyn Tx,
         user: UserId,
         except: SessionId,
         now: DateTime<Utc>,

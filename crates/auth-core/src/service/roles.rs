@@ -8,7 +8,9 @@ use super::{AccessService, AuthContext, Ports, admin_permissions as perm};
 use crate::{
     AuthError, Result,
     domain::*,
-    ports::{AssignmentRepository, NewRole, Page, PageRequest, RoleRepository, RoleUpdate},
+    ports::{
+        AssignmentRepository, NewRole, Page, PageRequest, RoleRepository, RoleUpdate, UnitOfWork,
+    },
 };
 
 #[derive(Debug)]
@@ -38,6 +40,7 @@ pub struct RoleService {
     roles: Arc<dyn RoleRepository>,
     assignments: Arc<dyn AssignmentRepository>,
     access: AccessService,
+    uow: Arc<dyn UnitOfWork>,
 }
 
 impl RoleService {
@@ -45,11 +48,13 @@ impl RoleService {
         roles: Arc<dyn RoleRepository>,
         assignments: Arc<dyn AssignmentRepository>,
         access: AccessService,
+        uow: Arc<dyn UnitOfWork>,
     ) -> Self {
         Self {
             roles,
             assignments,
             access,
+            uow,
         }
     }
 
@@ -58,6 +63,7 @@ impl RoleService {
             ports.roles.clone(),
             ports.assignments.clone(),
             AccessService::from_ports(ports),
+            ports.uow.clone(),
         )
     }
 
@@ -90,7 +96,10 @@ impl RoleService {
             scope: input.scope,
         };
 
-        self.roles.create(&new).await
+        let mut tx = self.uow.begin().await?;
+        let role: Role = self.roles.create(&mut *tx, &new).await?;
+        tx.commit().await?;
+        Ok(role)
     }
 
     /// `scope` роли этим методом не меняется: смена `scope` у уже назначенной роли
@@ -123,7 +132,10 @@ impl RoleService {
             name: clean_name(&input.name)?,
         };
 
-        self.roles.update(id, &upd).await
+        let mut tx = self.uow.begin().await?;
+        let role: Role = self.roles.update(&mut *tx, id, &upd).await?;
+        tx.commit().await?;
+        Ok(role)
     }
 
     /// Назначения роли и её права удаляются вместе с ней (атомарно, внутри репозитория).
@@ -140,7 +152,9 @@ impl RoleService {
             .await?
             .ok_or(AuthError::NotFound)?;
         ensure_not_system(&current, "удалить")?;
-        self.roles.delete(id).await
+        let mut tx = self.uow.begin().await?;
+        self.roles.delete(&mut *tx, id).await?;
+        tx.commit().await
     }
 
     #[instrument(skip_all, fields(actor = %actor.user_id(), target = %role), err(level = Level::WARN))]
@@ -177,7 +191,15 @@ impl RoleService {
             .ok_or(AuthError::NotFound)?;
         ensure_not_system(&current, "редактировать по правам: у неё всегда все права")?;
 
-        self.roles.set_permissions(role, permission_ids).await
+        let mut tx = self.uow.begin().await?;
+
+        let roles = self
+            .roles
+            .set_permissions(&mut *tx, role, permission_ids)
+            .await?;
+
+        tx.commit().await?;
+        Ok(roles)
     }
 
     /// Назначает роль пользователю. Соответствие `role.scope` и `input.scope`
@@ -199,9 +221,13 @@ impl RoleService {
         self.require_holds_role(actor, role.id, scope.as_ref())
             .await?;
 
+        let mut tx = self.uow.begin().await?;
+
         self.assignments
-            .assign(input.user, input.role, scope.as_ref())
-            .await
+            .assign(&mut *tx, input.user, input.role, scope.as_ref())
+            .await?;
+
+        tx.commit().await
     }
 
     /// Идемпотентно: отсутствие назначения — не ошибка.
@@ -214,9 +240,11 @@ impl RoleService {
         let scope = input.scope.as_deref().map(ScopeId::parse).transpose()?;
         self.require_holds_role(actor, input.role, scope.as_ref())
             .await?;
+        let mut tx = self.uow.begin().await?;
         self.assignments
-            .unassign(input.user, input.role, scope.as_ref())
-            .await
+            .unassign(&mut *tx, input.user, input.role, scope.as_ref())
+            .await?;
+        tx.commit().await
     }
 
     /// Трогать роль можно, только если у тебя есть все её права: иначе через
@@ -279,7 +307,7 @@ mod tests {
         let h = Harness::new();
         let roles = Arc::new(MemRoles::default());
         let assignments = Arc::new(MemAssignments::default());
-        let svc = RoleService::new(roles, assignments, h.access.clone());
+        let svc = RoleService::new(roles, assignments, h.access.clone(), h.uow.clone());
         let admin = h.users.seed("admin@example.com", "admin-password", true);
         for code in [perm::ROLES_VIEW, perm::ROLES_MANAGE, perm::ROLES_ASSIGN] {
             h.permissions.grant(admin.id, None, code);

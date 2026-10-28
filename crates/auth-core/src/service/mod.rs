@@ -12,7 +12,7 @@ use std::sync::Arc;
 use crate::ports::{
     AccessTokenCodec, AssignmentRepository, Clock, PasswordHasher, PermissionRepository,
     RefreshTokenProvider, RoleRepository, SessionRepository, SettingsRepository, SetupRepository,
-    UserRepository,
+    UnitOfWork, UserRepository,
 };
 
 pub use access::{AccessService, admin_permissions};
@@ -37,4 +37,5 @@ pub struct Ports {
     pub clock: Arc<dyn Clock>,
     pub settings: Arc<dyn SettingsRepository>,
     pub setup: Arc<dyn SetupRepository>,
+    pub uow: Arc<dyn UnitOfWork>,
 }

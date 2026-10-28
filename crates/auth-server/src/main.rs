@@ -8,11 +8,15 @@ use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, bail};
 use auth_api::ApiState;
-use auth_core::{ports::SessionRepository, service::Ports};
+use auth_core::{
+    AuthError,
+    ports::{SessionRepository, UnitOfWork},
+    service::Ports,
+};
 use auth_crypto::{Argon2PasswordHasher, Jwks, JwtCodec, Sha256RefreshTokenProvider};
 use auth_postgres::{
     PgAssignmentRepository, PgPermissionRepository, PgPool, PgRoleRepository, PgSessionRepository,
-    PgSettingsRepository, PgSetupRepository, PgUserRepository,
+    PgSettingsRepository, PgSetupRepository, PgUnitOfWork, PgUserRepository,
 };
 use axum::{Json, Router, http::StatusCode, routing::get};
 use chrono::{TimeDelta, Utc};
@@ -92,6 +96,7 @@ async fn main() -> anyhow::Result<()> {
         clock: Arc::new(auth_core::ports::SystemClock),
         settings: Arc::new(PgSettingsRepository::new(pool.clone())),
         setup: Arc::new(PgSetupRepository::new(pool.clone())),
+        uow: Arc::new(PgUnitOfWork::new(pool.clone())),
     };
 
     let policy = cfg.auth.build().context("auth policy")?;
@@ -109,6 +114,7 @@ async fn main() -> anyhow::Result<()> {
     // воркер — после проверки конфига, но до приёма запросов
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let cleanup = tokio::spawn(session_cleanup(
+        ports.uow.clone(),
         sessions.clone(),
         cfg.maintenance.clone(),
         shutdown_rx,
@@ -132,6 +138,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn session_cleanup(
+    uow: Arc<dyn UnitOfWork>,
     sessions: Arc<PgSessionRepository>,
     cfg: config::MaintenanceConfig,
     mut shutdown: watch::Receiver<bool>,
@@ -153,10 +160,13 @@ async fn session_cleanup(
         let Some(before) = Utc::now().checked_sub_signed(retention) else {
             continue; // retention длиннее эпохи — удалять нечего
         };
-        match sessions.purge_stale(before).await {
-            Ok(deleted) => info!(deleted, "очистка устаревших сессий завершена"),
-            Err(error) => tracing::error!(%error, "не удалось очистить устаревшие сессии"),
+        let _result = async {
+            let mut tx = uow.begin().await?;
+            let deleted = sessions.purge_stale(tx.as_mut(), before).await?;
+            tx.commit().await?;
+            Ok::<_, AuthError>(deleted)
         }
+        .await;
     }
     info!("воркер очистки сессий остановлен");
 }

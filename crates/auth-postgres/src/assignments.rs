@@ -4,12 +4,12 @@ use async_trait::async_trait;
 use auth_core::{
     AuthError, Result,
     domain::{Role, RoleAssignment, RoleCode, RoleId, RoleScope, ScopeId, UserId},
-    ports::AssignmentRepository,
+    ports::{AssignmentRepository, Tx},
 };
 use sqlx::PgPool;
 use tracing::instrument;
 
-use crate::{admin_guard, error::map_db_error};
+use crate::{admin_guard, error::map_db_error, tx::PgTx};
 
 /// `''` <-> `None`: тот же сентинел, что в схеме — глобальное назначение хранится
 /// с пустой строкой вместо NULL (см. миграцию 0001_init.sql).
@@ -77,41 +77,55 @@ impl AssignmentRepository for PgAssignmentRepository {
         Ok(map)
     }
 
-    #[instrument(skip(self), err)]
-    async fn assign(&self, user: UserId, role: RoleId, scope: Option<&ScopeId>) -> Result<()> {
+    #[instrument(skip(self, tx), err)]
+    async fn assign(
+        &self,
+        tx: &mut dyn Tx,
+        user: UserId,
+        role: RoleId,
+        scope: Option<&ScopeId>,
+    ) -> Result<()> {
+        let conn = PgTx::from_dyn(tx)?.conn();
+
         // конфликт по PRIMARY KEY (user_id, role_id, scope) -> 23505 -> Conflict
         sqlx::query("insert into user_roles (user_id, role_id, scope) values ($1, $2, $3)")
             .bind(user.0)
             .bind(role.0)
             .bind(scope_to_db(scope))
-            .execute(&self.pool)
+            .execute(conn)
             .await
             .map_err(map_db_error)?;
         Ok(())
     }
 
-    #[instrument(skip(self), err)]
-    async fn unassign(&self, user: UserId, role: RoleId, scope: Option<&ScopeId>) -> Result<()> {
-        let mut tx = self.pool.begin().await.map_err(map_db_error)?;
-        let before = admin_guard::lock(&mut tx).await?;
+    #[instrument(skip(self, tx), err)]
+    async fn unassign(
+        &self,
+        tx: &mut dyn Tx,
+        user: UserId,
+        role: RoleId,
+        scope: Option<&ScopeId>,
+    ) -> Result<()> {
+        let conn = PgTx::from_dyn(tx)?.conn();
+        let before = admin_guard::lock(conn).await?;
 
         sqlx::query("delete from user_roles where user_id = $1 and role_id = $2 and scope = $3")
             .bind(user.0)
             .bind(role.0)
             .bind(scope_to_db(scope))
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await
             .map_err(map_db_error)?;
 
-        admin_guard::ensure_remains(&mut tx, before).await?;
-        tx.commit().await.map_err(map_db_error)
+        admin_guard::ensure_remains(conn, before).await
     }
 
-    #[instrument(skip(self), err)]
-    async fn revoke_all_in_scope(&self, scope: &ScopeId) -> Result<u64> {
+    #[instrument(skip(self, tx), err)]
+    async fn revoke_all_in_scope(&self, tx: &mut dyn Tx, scope: &ScopeId) -> Result<u64> {
+        let conn = PgTx::from_dyn(tx)?.conn();
         let result = sqlx::query("delete from user_roles where scope = $1")
             .bind(scope.as_str())
-            .execute(&self.pool)
+            .execute(conn)
             .await
             .map_err(map_db_error)?;
         Ok(result.rows_affected())

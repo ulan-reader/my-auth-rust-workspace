@@ -2,12 +2,12 @@ use async_trait::async_trait;
 use auth_core::{
     AuthError, Result,
     domain::{Permission, PermissionCode, PermissionId, Role, RoleCode, RoleId, RoleScope},
-    ports::{NewRole, Page, PageRequest, RoleRepository, RoleUpdate},
+    ports::{NewRole, Page, PageRequest, RoleRepository, RoleUpdate, Tx},
 };
 use sqlx::PgPool;
 use tracing::instrument;
 
-use crate::error::map_db_error;
+use crate::{error::map_db_error, tx::PgTx};
 
 #[derive(sqlx::FromRow)]
 struct RoleRow {
@@ -107,7 +107,8 @@ impl RoleRepository for PgRoleRepository {
     }
 
     #[instrument(skip_all, err)]
-    async fn create(&self, new: &NewRole) -> Result<Role> {
+    async fn create(&self, tx: &mut dyn Tx, new: &NewRole) -> Result<Role> {
+        let conn = PgTx::from_dyn(tx)?.conn();
         let row: RoleRow = sqlx::query_as(
             r#"
             insert into roles (code, name, scope)
@@ -118,15 +119,16 @@ impl RoleRepository for PgRoleRepository {
         .bind(new.code.as_str())
         .bind(&new.name)
         .bind(new.scope.as_str())
-        .fetch_one(&self.pool)
+        .fetch_one(conn)
         .await
         .map_err(map_db_error)?;
         row.into_role()
     }
 
     /// `scope` роли этим методом сознательно не меняется — только `code` и `name`.
-    #[instrument(skip(self), err)]
-    async fn update(&self, id: RoleId, upd: &RoleUpdate) -> Result<Role> {
+    #[instrument(skip(self, tx), err)]
+    async fn update(&self, tx: &mut dyn Tx, id: RoleId, upd: &RoleUpdate) -> Result<Role> {
+        let conn = PgTx::from_dyn(tx)?.conn();
         let row: Option<RoleRow> = sqlx::query_as(
             r#"
             update roles set code = $1, name = $2
@@ -137,18 +139,19 @@ impl RoleRepository for PgRoleRepository {
         .bind(upd.code.as_str())
         .bind(&upd.name)
         .bind(id.0)
-        .fetch_optional(&self.pool)
+        .fetch_optional(conn)
         .await
         .map_err(map_db_error)?;
         row.ok_or(AuthError::NotFound)?.into_role()
     }
 
-    #[instrument(skip(self), err)]
-    async fn delete(&self, id: RoleId) -> Result<()> {
+    #[instrument(skip(self, tx), err)]
+    async fn delete(&self, tx: &mut dyn Tx, id: RoleId) -> Result<()> {
+        let conn = PgTx::from_dyn(tx)?.conn();
         // role_permissions и user_roles удаляются каскадом
         let result = sqlx::query("delete from roles where id = $1")
             .bind(id.0)
-            .execute(&self.pool)
+            .execute(conn)
             .await
             .map_err(map_db_error)?;
         if result.rows_affected() == 0 {
@@ -177,9 +180,10 @@ impl RoleRepository for PgRoleRepository {
             .collect()
     }
 
-    #[instrument(skip(self), err)]
+    #[instrument(skip(self, tx), err)]
     async fn set_permissions(
         &self,
+        tx: &mut dyn Tx,
         role: RoleId,
         permission_ids: &[PermissionId],
     ) -> Result<Vec<Permission>> {
@@ -193,10 +197,10 @@ impl RoleRepository for PgRoleRepository {
             return Err(AuthError::NotFound);
         }
 
-        let mut tx = self.pool.begin().await.map_err(map_db_error)?;
+        let conn = PgTx::from_dyn(tx)?.conn();
         sqlx::query("delete from role_permissions where role_id = $1")
             .bind(role.0)
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await
             .map_err(map_db_error)?;
 
@@ -209,11 +213,10 @@ impl RoleRepository for PgRoleRepository {
             )
             .bind(role.0)
             .bind(&ids)
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await
             .map_err(map_db_error)?;
         }
-        tx.commit().await.map_err(map_db_error)?;
 
         let rows: Vec<PermissionRow> = sqlx::query_as(
             r#"

@@ -17,6 +17,37 @@ use crate::{
     service::{AccessService, AuthPolicy, AuthService},
 };
 
+// --------транкзации--------
+
+pub struct MemTx;
+#[async_trait::async_trait]
+impl Tx for MemTx {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    async fn commit(self: Box<Self>) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+pub struct MemUnitOfWork;
+
+#[async_trait]
+impl UnitOfWork for MemUnitOfWork {
+    async fn begin(&self) -> Result<Box<dyn Tx>> {
+        Ok(Box::new(MemTx))
+    }
+}
+
+#[tokio::test]
+async fn mem_unit_of_work_can_begin_and_commit() {
+    let uow = MemUnitOfWork;
+
+    let tx = uow.begin().await.unwrap();
+    tx.commit().await.unwrap();
+}
 // ---------- часы ----------
 
 pub struct FakeClock(Mutex<DateTime<Utc>>);
@@ -194,7 +225,7 @@ impl UserRepository for MemUsers {
         Ok(Page::new(items, req, total))
     }
 
-    async fn create(&self, new: &NewUser) -> Result<User> {
+    async fn create(&self, _tx: &mut dyn Tx, new: &NewUser) -> Result<User> {
         let mut rows = self.rows.lock().unwrap();
         if rows.iter().any(|(u, _)| u.email == new.email) {
             return Err(AuthError::Conflict);
@@ -211,7 +242,7 @@ impl UserRepository for MemUsers {
         Ok(user)
     }
 
-    async fn update(&self, id: UserId, upd: &UserUpdate) -> Result<User> {
+    async fn update(&self, _tx: &mut dyn Tx, id: UserId, upd: &UserUpdate) -> Result<User> {
         let mut rows = self.rows.lock().unwrap();
         // сначала существование (как WHERE id = $N в реальной БД), потом конфликт email —
         // иначе чужой email, случайно совпавший с переданным, маскирует NotFound
@@ -228,7 +259,12 @@ impl UserRepository for MemUsers {
         Ok(user.clone())
     }
 
-    async fn set_password_hash(&self, id: UserId, hash: &PasswordHash) -> Result<()> {
+    async fn set_password_hash(
+        &self,
+        _tx: &mut dyn Tx,
+        id: UserId,
+        hash: &PasswordHash,
+    ) -> Result<()> {
         let mut rows = self.rows.lock().unwrap();
         let row = rows
             .iter_mut()
@@ -238,7 +274,7 @@ impl UserRepository for MemUsers {
         Ok(())
     }
 
-    async fn set_active(&self, id: UserId, active: bool) -> Result<()> {
+    async fn set_active(&self, _tx: &mut dyn Tx, id: UserId, active: bool) -> Result<()> {
         let mut rows = self.rows.lock().unwrap();
         let row = rows
             .iter_mut()
@@ -248,7 +284,7 @@ impl UserRepository for MemUsers {
         Ok(())
     }
 
-    async fn delete(&self, id: UserId) -> Result<()> {
+    async fn delete(&self, _tx: &mut dyn Tx, id: UserId) -> Result<()> {
         let mut rows = self.rows.lock().unwrap();
         let before = rows.len();
         rows.retain(|(u, _)| u.id != id);
@@ -281,7 +317,7 @@ impl MemSessions {
 
 #[async_trait]
 impl SessionRepository for MemSessions {
-    async fn create(&self, new: &NewSession) -> Result<Session> {
+    async fn create(&self, _tx: &mut dyn Tx, new: &NewSession) -> Result<Session> {
         let id = SessionId(self.next_id.fetch_add(1, Ordering::SeqCst) + 1);
         let session = Session {
             id,
@@ -322,6 +358,7 @@ impl SessionRepository for MemSessions {
 
     async fn rotate(
         &self,
+        _tx: &mut dyn Tx,
         old: SessionId,
         next: &NewSession,
         now: DateTime<Utc>,
@@ -348,7 +385,13 @@ impl SessionRepository for MemSessions {
         Ok(session)
     }
 
-    async fn revoke(&self, user: UserId, session: SessionId, now: DateTime<Utc>) -> Result<()> {
+    async fn revoke(
+        &self,
+        _tx: &mut dyn Tx,
+        user: UserId,
+        session: SessionId,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
         let mut rows = self.rows.lock().unwrap();
         let row = rows
             .iter_mut()
@@ -360,7 +403,12 @@ impl SessionRepository for MemSessions {
         Ok(())
     }
 
-    async fn revoke_all_for_user(&self, user: UserId, now: DateTime<Utc>) -> Result<u64> {
+    async fn revoke_all_for_user(
+        &self,
+        _tx: &mut dyn Tx,
+        user: UserId,
+        now: DateTime<Utc>,
+    ) -> Result<u64> {
         let mut rows = self.rows.lock().unwrap();
         let mut revoked = 0;
         for (s, _) in rows
@@ -373,7 +421,7 @@ impl SessionRepository for MemSessions {
         Ok(revoked)
     }
 
-    async fn purge_stale(&self, before: DateTime<Utc>) -> Result<u64> {
+    async fn purge_stale(&self, _tx: &mut dyn Tx, before: DateTime<Utc>) -> Result<u64> {
         let mut rows = self.rows.lock().unwrap();
         let before_count = rows.len();
         rows.retain(|(s, _)| {
@@ -385,6 +433,7 @@ impl SessionRepository for MemSessions {
 
     async fn revoke_all_for_user_except(
         &self,
+        _tx: &mut dyn Tx,
         user: UserId,
         except: SessionId,
         now: DateTime<Utc>,
@@ -451,6 +500,7 @@ pub struct Harness {
     pub permissions: Arc<MemPermissions>,
     pub auth: AuthService,
     pub access: AccessService,
+    pub uow: Arc<MemUnitOfWork>,
 }
 
 impl Harness {
@@ -460,6 +510,7 @@ impl Harness {
         let sessions = Arc::new(MemSessions::default());
         let hasher = Arc::new(FakeHasher::default());
         let permissions = Arc::new(MemPermissions::default());
+        let uow = Arc::new(MemUnitOfWork);
 
         let auth = AuthService::new(
             users.clone(),
@@ -469,6 +520,7 @@ impl Harness {
             Arc::new(FakeRefresh::default()),
             clock.clone(),
             MemSettings::new(false),
+            uow.clone(),
             AuthPolicy::default(),
         );
 
@@ -482,6 +534,7 @@ impl Harness {
             permissions,
             auth,
             access,
+            uow,
         }
     }
 }
@@ -530,7 +583,13 @@ impl AssignmentRepository for MemAssignments {
         Ok(map)
     }
 
-    async fn assign(&self, user: UserId, role: RoleId, scope: Option<&ScopeId>) -> Result<()> {
+    async fn assign(
+        &self,
+        _tx: &mut dyn Tx,
+        user: UserId,
+        role: RoleId,
+        scope: Option<&ScopeId>,
+    ) -> Result<()> {
         let mut rows = self.rows.lock().unwrap();
         if rows
             .iter()
@@ -558,13 +617,19 @@ impl AssignmentRepository for MemAssignments {
         Ok(())
     }
 
-    async fn unassign(&self, user: UserId, role: RoleId, scope: Option<&ScopeId>) -> Result<()> {
+    async fn unassign(
+        &self,
+        _tx: &mut dyn Tx,
+        user: UserId,
+        role: RoleId,
+        scope: Option<&ScopeId>,
+    ) -> Result<()> {
         let mut rows = self.rows.lock().unwrap();
         rows.retain(|(u, a)| !(*u == user && a.role.id == role && a.scope.as_ref() == scope));
         Ok(())
     }
 
-    async fn revoke_all_in_scope(&self, scope: &ScopeId) -> Result<u64> {
+    async fn revoke_all_in_scope(&self, _tx: &mut dyn Tx, scope: &ScopeId) -> Result<u64> {
         let mut rows = self.rows.lock().unwrap();
         let before = rows.len();
         rows.retain(|(_, a)| a.scope.as_ref() != Some(scope));
@@ -617,7 +682,7 @@ impl RoleRepository for MemRoles {
         Ok(Page::new(items, req, total))
     }
 
-    async fn create(&self, new: &NewRole) -> Result<Role> {
+    async fn create(&self, _tx: &mut dyn Tx, new: &NewRole) -> Result<Role> {
         let mut rows = self.rows.lock().unwrap();
         if rows.iter().any(|r| r.code == new.code) {
             return Err(AuthError::Conflict);
@@ -633,7 +698,7 @@ impl RoleRepository for MemRoles {
         Ok(role)
     }
 
-    async fn update(&self, id: RoleId, upd: &RoleUpdate) -> Result<Role> {
+    async fn update(&self, _tx: &mut dyn Tx, id: RoleId, upd: &RoleUpdate) -> Result<Role> {
         let mut rows = self.rows.lock().unwrap();
         if rows.iter().any(|r| r.id != id && r.code == upd.code) {
             return Err(AuthError::Conflict);
@@ -647,7 +712,7 @@ impl RoleRepository for MemRoles {
         Ok(role.clone())
     }
 
-    async fn delete(&self, id: RoleId) -> Result<()> {
+    async fn delete(&self, _tx: &mut dyn Tx, id: RoleId) -> Result<()> {
         let mut rows = self.rows.lock().unwrap();
         let before = rows.len();
         rows.retain(|r| r.id != id);
@@ -674,6 +739,7 @@ impl RoleRepository for MemRoles {
 
     async fn set_permissions(
         &self,
+        _tx: &mut dyn Tx,
         role: RoleId,
         permission_ids: &[PermissionId],
     ) -> Result<Vec<Permission>> {

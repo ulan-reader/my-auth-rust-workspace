@@ -2,12 +2,12 @@ use async_trait::async_trait;
 use auth_core::{
     AuthError, Result,
     domain::{Email, PasswordHash, User, UserId},
-    ports::{NewUser, Page, PageRequest, UserCredentials, UserRepository, UserUpdate},
+    ports::{NewUser, Page, PageRequest, Tx, UserCredentials, UserRepository, UserUpdate},
 };
 use sqlx::PgPool;
 use tracing::instrument;
 
-use crate::{admin_guard, error::map_db_error};
+use crate::{admin_guard, error::map_db_error, tx::PgTx};
 
 #[derive(sqlx::FromRow)]
 pub(crate) struct UserRow {
@@ -77,12 +77,34 @@ impl UserRepository for PgUserRepository {
     #[instrument(skip(self), err)]
     async fn list(&self, req: &PageRequest) -> Result<Page<User>> {
         let pattern = req.search.as_ref().map(|s| format!("%{s}%"));
-        let rows: Vec<(i64, String, String, String, String, bool, i64)> = sqlx::query_as(
+
+        let total: i64 = sqlx::query_scalar(
             r#"
-            select id, email, password_hash, first_name, second_name, is_active,
-                   count(*) over() as total_count
+            select count(*)
             from users
-            where ($1::text is null or email ilike $1 or first_name ilike $1 or second_name ilike $1)
+            where (
+                $1::text is null
+                or email ilike $1
+                or first_name ilike $1
+                or second_name ilike $1
+            )
+            "#,
+        )
+        .bind(&pattern)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_db_error)?;
+
+        let rows: Vec<UserRow> = sqlx::query_as(
+            r#"
+            select id, email, password_hash, first_name, second_name, is_active
+            from users
+            where (
+                $1::text is null
+                or email ilike $1
+                or first_name ilike $1
+                or second_name ilike $1
+            )
             order by id
             limit $2 offset $3
             "#,
@@ -94,28 +116,17 @@ impl UserRepository for PgUserRepository {
         .await
         .map_err(map_db_error)?;
 
-        let total = rows.first().map(|r| r.6).unwrap_or(0);
         let items = rows
             .into_iter()
-            .map(
-                |(id, email, password_hash, first_name, second_name, is_active, _)| {
-                    UserRow {
-                        id,
-                        email,
-                        password_hash,
-                        first_name,
-                        second_name,
-                        is_active,
-                    }
-                    .into_user()
-                },
-            )
+            .map(UserRow::into_user)
             .collect::<Result<Vec<_>>>()?;
+
         Ok(Page::new(items, req, total))
     }
 
     #[instrument(skip_all, err)]
-    async fn create(&self, new: &NewUser) -> Result<User> {
+    async fn create(&self, tx: &mut dyn Tx, new: &NewUser) -> Result<User> {
+        let conn = PgTx::from_dyn(tx)?.conn();
         let row: UserRow = sqlx::query_as(
             r#"
             insert into users (email, password_hash, first_name, second_name)
@@ -127,14 +138,15 @@ impl UserRepository for PgUserRepository {
         .bind(new.password_hash.as_str())
         .bind(&new.first_name)
         .bind(&new.second_name)
-        .fetch_one(&self.pool)
+        .fetch_one(conn)
         .await
         .map_err(map_db_error)?;
         row.into_user()
     }
 
-    #[instrument(skip(self), err)]
-    async fn update(&self, id: UserId, upd: &UserUpdate) -> Result<User> {
+    #[instrument(skip(self, tx), err)]
+    async fn update(&self, tx: &mut dyn Tx, id: UserId, upd: &UserUpdate) -> Result<User> {
+        let conn = PgTx::from_dyn(tx)?.conn();
         let row: Option<UserRow> = sqlx::query_as(
             r#"
             update users set email = $1, first_name = $2, second_name = $3
@@ -146,18 +158,24 @@ impl UserRepository for PgUserRepository {
         .bind(&upd.first_name)
         .bind(&upd.second_name)
         .bind(id.0)
-        .fetch_optional(&self.pool)
+        .fetch_optional(conn)
         .await
         .map_err(map_db_error)?;
         row.ok_or(AuthError::NotFound)?.into_user()
     }
 
-    #[instrument(skip(self), err)]
-    async fn set_password_hash(&self, id: UserId, hash: &PasswordHash) -> Result<()> {
+    #[instrument(skip(self, tx), err)]
+    async fn set_password_hash(
+        &self,
+        tx: &mut dyn Tx,
+        id: UserId,
+        hash: &PasswordHash,
+    ) -> Result<()> {
+        let conn = PgTx::from_dyn(tx)?.conn();
         let result = sqlx::query("update users set password_hash = $1 where id = $2")
             .bind(hash.as_str())
             .bind(id.0)
-            .execute(&self.pool)
+            .execute(conn)
             .await
             .map_err(map_db_error)?;
         if result.rows_affected() == 0 {
@@ -166,41 +184,39 @@ impl UserRepository for PgUserRepository {
         Ok(())
     }
 
-    #[instrument(skip(self), err)]
-    async fn set_active(&self, id: UserId, active: bool) -> Result<()> {
-        let mut tx = self.pool.begin().await.map_err(map_db_error)?;
-        let before = admin_guard::lock(&mut tx).await?;
+    #[instrument(skip(self, tx), err)]
+    async fn set_active(&self, tx: &mut dyn Tx, id: UserId, active: bool) -> Result<()> {
+        let conn = PgTx::from_dyn(tx)?.conn();
+        let before = admin_guard::lock(conn).await?;
 
         let result = sqlx::query("update users set is_active = $1 where id = $2")
             .bind(active)
             .bind(id.0)
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await
             .map_err(map_db_error)?;
         if result.rows_affected() == 0 {
             return Err(AuthError::NotFound);
         }
 
-        admin_guard::ensure_remains(&mut tx, before).await?;
-        tx.commit().await.map_err(map_db_error)
+        admin_guard::ensure_remains(conn, before).await
     }
 
-    #[instrument(skip(self), err)]
-    async fn delete(&self, id: UserId) -> Result<()> {
-        let mut tx = self.pool.begin().await.map_err(map_db_error)?;
-        let before = admin_guard::lock(&mut tx).await?;
+    #[instrument(skip(self, tx), err)]
+    async fn delete(&self, tx: &mut dyn Tx, id: UserId) -> Result<()> {
+        let conn = PgTx::from_dyn(tx)?.conn();
+        let before = admin_guard::lock(conn).await?;
 
         // user_roles и sessions удаляются каскадом (ON DELETE CASCADE в миграции)
         let result = sqlx::query("delete from users where id = $1")
             .bind(id.0)
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await
             .map_err(map_db_error)?;
         if result.rows_affected() == 0 {
             return Err(AuthError::NotFound);
         }
 
-        admin_guard::ensure_remains(&mut tx, before).await?;
-        tx.commit().await.map_err(map_db_error)
+        admin_guard::ensure_remains(conn, before).await
     }
 }

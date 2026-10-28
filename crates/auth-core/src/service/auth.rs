@@ -12,7 +12,7 @@ use crate::{
     domain::*,
     ports::{
         AccessTokenCodec, Clock, NewSession, PasswordHasher, RefreshTokenProvider,
-        SessionRepository, SettingsRepository, UserRepository,
+        SessionRepository, SettingsRepository, Tx, UnitOfWork, UserRepository,
     },
 };
 
@@ -125,6 +125,7 @@ pub struct AuthService {
     refresh_tokens: Arc<dyn RefreshTokenProvider>,
     clock: Arc<dyn Clock>,
     settings: Arc<dyn SettingsRepository>,
+    uow: Arc<dyn UnitOfWork>,
     policy: AuthPolicy,
 }
 
@@ -138,6 +139,7 @@ impl AuthService {
         refresh_tokens: Arc<dyn RefreshTokenProvider>,
         clock: Arc<dyn Clock>,
         settings: Arc<dyn SettingsRepository>,
+        uow: Arc<dyn UnitOfWork>,
         policy: AuthPolicy,
     ) -> Self {
         Self {
@@ -148,6 +150,7 @@ impl AuthService {
             refresh_tokens,
             clock,
             settings,
+            uow,
             policy,
         }
     }
@@ -161,6 +164,7 @@ impl AuthService {
             ports.refresh_tokens.clone(),
             ports.clock.clone(),
             ports.settings.clone(),
+            ports.uow.clone(),
             policy,
         )
     }
@@ -189,7 +193,9 @@ impl AuthService {
             return Err(AuthError::AccountDisabled);
         }
 
-        let tokens = self.start_session(creds.user.id).await?;
+        let mut tx = self.uow.begin().await?;
+        let tokens = self.start_session(&mut *tx, creds.user.id).await?;
+        tx.commit().await?;
         Ok(LoginResult {
             user: creds.user,
             tokens,
@@ -223,9 +229,11 @@ impl AuthService {
             warn!(
                 "повторное использование отозванного refresh-токена: отзываем все сессии пользователя"
             );
+            let mut tx = self.uow.begin().await?;
             self.sessions
-                .revoke_all_for_user(session.user_id, now)
+                .revoke_all_for_user(&mut *tx, session.user_id, now)
                 .await?;
+            tx.commit().await?;
             return Err(AuthError::Unauthorized);
         }
         if session.expires_at <= now {
@@ -248,12 +256,14 @@ impl AuthService {
             created_at: now,
             expires_at: now + self.policy.refresh_ttl,
         };
-        let next_session = match self.sessions.rotate(session.id, &next, now).await {
+        let mut tx = self.uow.begin().await?;
+        let next_session = match self.sessions.rotate(&mut *tx, session.id, &next, now).await {
             Ok(s) => s,
             Err(AuthError::Conflict) => return Err(AuthError::Unauthorized),
             Err(e) => return Err(e),
         };
 
+        tx.commit().await?;
         self.build_pair(
             user.id,
             next_session.id,
@@ -268,22 +278,32 @@ impl AuthService {
     pub async fn logout(&self, refresh_token: &SecretString) -> Result<()> {
         let now = self.clock.now();
         let hash = self.refresh_tokens.hash(refresh_token);
+        let mut tx = self.uow.begin().await?;
         if let Some(session) = self.sessions.find_by_token_hash(&hash).await?
             && session.is_active(now)
         {
-            match self.sessions.revoke(session.user_id, session.id, now).await {
+            match self
+                .sessions
+                .revoke(&mut *tx, session.user_id, session.id, now)
+                .await
+            {
                 Ok(()) | Err(AuthError::NotFound) => {}
                 Err(e) => return Err(e),
             }
         }
+        tx.commit().await?;
         Ok(())
     }
 
     /// Выйти со всех устройств. Возвращает, сколько сессий отозвано.
     pub async fn logout_all(&self, ctx: AuthContext) -> Result<u64> {
-        self.sessions
-            .revoke_all_for_user(ctx.user.id, self.clock.now())
-            .await
+        let mut tx = self.uow.begin().await?;
+        let count_sessions = self
+            .sessions
+            .revoke_all_for_user(&mut *tx, ctx.user.id, self.clock.now())
+            .await?;
+        tx.commit().await?;
+        Ok(count_sessions)
     }
 
     /// Самостоятельная смена пароля (не админом): требует старый пароль.
@@ -313,11 +333,17 @@ impl AuthService {
 
         validate_password(new_password)?;
         let hash = self.hasher.hash(new_password).await?;
-        self.users.set_password_hash(ctx.user.id, &hash).await?;
+        let mut tx = self.uow.begin().await?;
+        self.users
+            .set_password_hash(&mut *tx, ctx.user.id, &hash)
+            .await?;
 
-        self.sessions
-            .revoke_all_for_user_except(ctx.user.id, ctx.session_id, self.clock.now())
-            .await
+        let count = self
+            .sessions
+            .revoke_all_for_user_except(&mut *tx, ctx.user.id, ctx.session_id, self.clock.now())
+            .await?;
+        tx.commit().await?;
+        Ok(count)
     }
 
     /// Проверка access-токена: подпись и срок, затем живая ли сессия и активен ли пользователь.
@@ -373,22 +399,28 @@ impl AuthService {
             first_name: clean_name(&input.first_name, "имя")?,
             second_name: clean_name(&input.second_name, "фамилия")?,
         };
-        let user = self.users.create(&new).await?;
-        let tokens = self.start_session(user.id).await?;
+        let mut tx = self.uow.begin().await?;
+        let user = self.users.create(&mut *tx, &new).await?;
+        let tokens = self.start_session(&mut *tx, user.id).await?;
+        tx.commit().await?;
         Ok(LoginResult { user, tokens })
     }
 
-    async fn start_session(&self, user_id: UserId) -> Result<TokenPair> {
+    async fn start_session(&self, tx: &mut dyn Tx, user_id: UserId) -> Result<TokenPair> {
         let now = self.clock.now();
         let refresh = self.refresh_tokens.issue()?;
+
         let session = self
             .sessions
-            .create(&NewSession {
-                user_id,
-                token_hash: refresh.hash.clone(),
-                created_at: now,
-                expires_at: now + self.policy.refresh_ttl(),
-            })
+            .create(
+                tx,
+                &NewSession {
+                    user_id,
+                    token_hash: refresh.hash.clone(),
+                    created_at: now,
+                    expires_at: now + self.policy.refresh_ttl(),
+                },
+            )
             .await?;
         self.build_pair(user_id, session.id, refresh.token, session.expires_at, now)
     }
@@ -560,9 +592,9 @@ mod tests {
             .await
             .unwrap()
             .tokens;
-
-        h.users.set_active(user.id, false).await.unwrap();
-
+        let mut tx = h.uow.begin().await.unwrap();
+        h.users.set_active(&mut *tx, user.id, false).await.unwrap();
+        tx.commit().await.unwrap();
         assert!(matches!(
             h.auth
                 .authenticate(tokens.access_token.expose_secret())
@@ -809,6 +841,7 @@ mod register_tests {
             std::sync::Arc::new(crate::testing::FakeRefresh::default()),
             h.clock.clone(),
             crate::testing::MemSettings::new(true),
+            h.uow.clone(),
             AuthPolicy::default(),
         );
 

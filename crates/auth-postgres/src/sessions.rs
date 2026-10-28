@@ -2,13 +2,13 @@ use async_trait::async_trait;
 use auth_core::{
     AuthError, Result,
     domain::{Session, SessionId, TokenHash, UserId},
-    ports::{NewSession, SessionRepository},
+    ports::{NewSession, SessionRepository, Tx},
 };
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use tracing::instrument;
 
-use crate::error::map_db_error;
+use crate::{error::map_db_error, tx::PgTx};
 
 #[derive(sqlx::FromRow)]
 struct SessionRow {
@@ -44,7 +44,8 @@ impl PgSessionRepository {
 #[async_trait]
 impl SessionRepository for PgSessionRepository {
     #[instrument(skip_all, err)]
-    async fn create(&self, new: &NewSession) -> Result<Session> {
+    async fn create(&self, tx: &mut dyn Tx, new: &NewSession) -> Result<Session> {
+        let conn = PgTx::from_dyn(tx)?.conn();
         let row: SessionRow = sqlx::query_as(
             r#"
             insert into sessions (user_id, token_hash, created_at, expires_at)
@@ -56,7 +57,7 @@ impl SessionRepository for PgSessionRepository {
         .bind(new.token_hash.as_str())
         .bind(new.created_at)
         .bind(new.expires_at)
-        .fetch_one(&self.pool)
+        .fetch_one(conn)
         .await
         .map_err(map_db_error)?;
         Ok(row.into())
@@ -106,20 +107,21 @@ impl SessionRepository for PgSessionRepository {
     /// `SELECT ... FOR UPDATE` внутри транзакции: параллельный refresh тем же токеном
     /// дождётся этой блокировки и увидит уже выставленный `revoked_at`, получив `Conflict` —
     /// без гонки, при которой оба запроса выдали бы валидную пару токенов.
-    #[instrument(skip(self, next), err)]
+    #[instrument(skip(self, tx, next), err)]
     async fn rotate(
         &self,
+        tx: &mut dyn Tx,
         old: SessionId,
         next: &NewSession,
         now: DateTime<Utc>,
     ) -> Result<Session> {
-        let mut tx = self.pool.begin().await.map_err(map_db_error)?;
+        let conn = PgTx::from_dyn(tx)?.conn();
 
         let old_row: Option<SessionRow> = sqlx::query_as(
             "select id, user_id, created_at, expires_at, revoked_at from sessions where id = $1 for update"
         )
         .bind(old.0)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut *conn)
         .await
         .map_err(map_db_error)?;
         let old_row = old_row.ok_or(AuthError::NotFound)?;
@@ -130,7 +132,7 @@ impl SessionRepository for PgSessionRepository {
         sqlx::query("update sessions set revoked_at = $1 where id = $2")
             .bind(now)
             .bind(old.0)
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await
             .map_err(map_db_error)?;
 
@@ -145,23 +147,29 @@ impl SessionRepository for PgSessionRepository {
         .bind(next.token_hash.as_str())
         .bind(next.created_at)
         .bind(next.expires_at)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut *conn)
         .await
         .map_err(map_db_error)?;
 
-        tx.commit().await.map_err(map_db_error)?;
         Ok(new_row.into())
     }
 
-    #[instrument(skip(self), err)]
-    async fn revoke(&self, user: UserId, session: SessionId, now: DateTime<Utc>) -> Result<()> {
+    #[instrument(skip(self, tx), err)]
+    async fn revoke(
+        &self,
+        tx: &mut dyn Tx,
+        user: UserId,
+        session: SessionId,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let conn = PgTx::from_dyn(tx)?.conn();
         let result = sqlx::query(
             "update sessions set revoked_at = $1 where id = $2 and user_id = $3 and revoked_at is null",
         )
         .bind(now)
         .bind(session.0)
         .bind(user.0)
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
         .map_err(map_db_error)?;
         if result.rows_affected() == 0 {
@@ -172,7 +180,7 @@ impl SessionRepository for PgSessionRepository {
             )
             .bind(session.0)
             .bind(user.0)
-            .fetch_one(&self.pool)
+            .fetch_one(conn)
             .await
             .map_err(map_db_error)?;
             if !exists {
@@ -182,20 +190,27 @@ impl SessionRepository for PgSessionRepository {
         Ok(())
     }
 
-    #[instrument(skip(self), err)]
-    async fn revoke_all_for_user(&self, user: UserId, now: DateTime<Utc>) -> Result<u64> {
+    #[instrument(skip(self, tx), err)]
+    async fn revoke_all_for_user(
+        &self,
+        tx: &mut dyn Tx,
+        user: UserId,
+        now: DateTime<Utc>,
+    ) -> Result<u64> {
+        let conn = PgTx::from_dyn(tx)?.conn();
         let result = sqlx::query(
             "update sessions set revoked_at = $1 where user_id = $2 and revoked_at is null",
         )
         .bind(now)
         .bind(user.0)
-        .execute(&self.pool)
+        .execute(conn)
         .await
         .map_err(map_db_error)?;
         Ok(result.rows_affected())
     }
 
-    async fn purge_stale(&self, before: DateTime<Utc>) -> Result<u64> {
+    async fn purge_stale(&self, tx: &mut dyn Tx, before: DateTime<Utc>) -> Result<u64> {
+        let conn = PgTx::from_dyn(tx)?.conn();
         let result = sqlx::query(
             r#"
             DELETE FROM sessions
@@ -204,26 +219,28 @@ impl SessionRepository for PgSessionRepository {
             "#,
         )
         .bind(before)
-        .execute(&self.pool)
+        .execute(conn)
         .await
         .map_err(map_db_error)?;
         Ok(result.rows_affected())
     }
 
-    #[instrument(skip(self), err)]
+    #[instrument(skip(self, tx), err)]
     async fn revoke_all_for_user_except(
         &self,
+        tx: &mut dyn Tx,
         user: UserId,
         except: SessionId,
         now: DateTime<Utc>,
     ) -> Result<u64> {
+        let conn = PgTx::from_dyn(tx)?.conn();
         let result = sqlx::query(
             "update sessions set revoked_at = $1 where user_id = $2 and id != $3 and revoked_at is null",
         )
         .bind(now)
         .bind(user.0)
         .bind(except.0)
-        .execute(&self.pool)
+        .execute(conn)
         .await
         .map_err(map_db_error)?;
         Ok(result.rows_affected())

@@ -12,7 +12,7 @@ use crate::{
     domain::*,
     ports::{
         AssignmentRepository, Clock, NewUser, Page, PageRequest, PasswordHasher, SessionRepository,
-        UserRepository, UserUpdate,
+        UnitOfWork, UserRepository, UserUpdate,
     },
 };
 
@@ -70,6 +70,7 @@ pub struct UserService {
     hasher: Arc<dyn PasswordHasher>,
     clock: Arc<dyn Clock>,
     access: AccessService,
+    uow: Arc<dyn UnitOfWork>,
 }
 
 impl UserService {
@@ -80,6 +81,7 @@ impl UserService {
         hasher: Arc<dyn PasswordHasher>,
         clock: Arc<dyn Clock>,
         access: AccessService,
+        uow: Arc<dyn UnitOfWork>,
     ) -> Self {
         Self {
             users,
@@ -88,6 +90,7 @@ impl UserService {
             hasher,
             clock,
             access,
+            uow,
         }
     }
 
@@ -99,6 +102,7 @@ impl UserService {
             ports.hasher.clone(),
             ports.clock.clone(),
             AccessService::from_ports(ports),
+            ports.uow.clone(),
         )
     }
 
@@ -151,7 +155,10 @@ impl UserService {
             second_name: clean_name(&input.second_name, "фамилия")?,
         };
 
-        let user = self.users.create(&new).await?;
+        let mut tx = self.uow.begin().await?;
+        let user = self.users.create(&mut *tx, &new).await?;
+        tx.commit().await?;
+
         Ok(UserWithRoles {
             user,
             roles: Vec::new(),
@@ -176,7 +183,10 @@ impl UserService {
             second_name: clean_name(&input.second_name, "фамилия")?,
         };
 
-        let user = self.users.update(id, &upd).await?;
+        let mut tx = self.uow.begin().await?;
+        let user = self.users.update(&mut *tx, id, &upd).await?;
+        tx.commit().await?;
+
         self.with_roles(user).await
     }
 
@@ -196,11 +206,14 @@ impl UserService {
 
         validate_password(password)?;
         let hash = self.hasher.hash(password).await?;
-        self.users.set_password_hash(id, &hash).await?;
+        let mut tx = self.uow.begin().await?;
+
+        self.users.set_password_hash(&mut *tx, id, &hash).await?;
         self.sessions
-            .revoke_all_for_user(id, self.clock.now())
+            .revoke_all_for_user(&mut *tx, id, self.clock.now())
             .await?;
 
+        tx.commit().await?;
         Ok(())
     }
 
@@ -216,14 +229,18 @@ impl UserService {
             return Err(AuthError::validation("нельзя деактивировать самого себя"));
         }
 
-        self.users.set_active(id, active).await?;
+        let mut tx = self.uow.begin().await?;
+
+        self.users.set_active(&mut *tx, id, active).await?;
         if !active {
             let revoked = self
                 .sessions
-                .revoke_all_for_user(id, self.clock.now())
+                .revoke_all_for_user(&mut *tx, id, self.clock.now())
                 .await?;
             info!(revoked, "пользователь деактивирован, сессии отозваны");
         }
+
+        tx.commit().await?;
         Ok(())
     }
 
@@ -238,7 +255,9 @@ impl UserService {
         if actor.user_id() == id {
             return Err(AuthError::validation("нельзя удалить самого себя"));
         }
-        self.users.delete(id).await
+        let mut tx = self.uow.begin().await?;
+        self.users.delete(&mut *tx, id).await?;
+        tx.commit().await
     }
 
     /// Профиль текущего пользователя. Без проверки прав: свои роли видит каждый.
@@ -296,6 +315,7 @@ mod tests {
             h.hasher.clone(),
             h.clock.clone(),
             h.access.clone(),
+            h.uow.clone(),
         );
         let admin = h.users.seed("admin@example.com", "admin-password", true);
         for code in [perm::USERS_VIEW, perm::USERS_MANAGE] {
