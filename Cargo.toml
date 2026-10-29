@@ -3,11 +3,13 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ulan-reader/my-auth-rust-workspace"
 description = "Hexagonal auth/authz service and library for Rust + Axum"
+keywords = ["auth", "authorization", "rbac", "jwt", "axum"]
+categories = ["authentication", "web-programming"]
 rust-version = "1.98.1"
 
 [workspace.lints.rust]
@@ -18,11 +20,11 @@ all = { level = "warn", priority = -1 }
 
 [workspace.dependencies]
 # внутренние
-auth-core      = { path = "crates/auth-core" }
-auth-postgres  = { path = "crates/auth-postgres" }
-auth-api       = { path = "crates/auth-api" }
-auth-crypto    = { path = "crates/auth-crypto" }
-auth-telemetry = { path = "crates/auth-telemetry" }
+auth-core = { path = "crates/auth-core", version = "0.2.0" }
+auth-postgres = { path = "crates/auth-postgres", version = "0.2.0" }
+auth-api = { path = "crates/auth-api", version = "0.2.0" }
+auth-crypto = { path = "crates/auth-crypto", version = "0.2.0" }
+auth-telemetry = { path = "crates/auth-telemetry", version = "0.2.0" }
 
 # общие
 serde       = { version = "1", features = ["derive"] }

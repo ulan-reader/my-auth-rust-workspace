@@ -1,12 +1,14 @@
+**English** | [Русский](README.ru.md) | [Қазақша](README.kk.md)
+
 # auth-telemetry
 
-Инициализация `tracing` → OTLP/HTTP → Jaeger. Вызывается один раз в
-`auth-server`; спаны из всех крейтов (`#[instrument]` в `auth-core` и
-`auth-postgres`) утекают в тот же подписчик автоматически — им для этого
-ничего в `Cargo.toml` добавлять не нужно, только `tracing`.
+Sets up `tracing` → OTLP/HTTP → Jaeger. Called once in `auth-server`; spans from
+every crate (`#[instrument]` in `auth-core` and `auth-postgres`) reach the same
+subscriber automatically — those crates only need `tracing`, nothing else in
+their `Cargo.toml`.
 
-`TelemetryConfig.enabled = false` — просто fmt-логи в консоль, без OTLP
-(удобно для локалки без поднятого Jaeger).
+`TelemetryConfig.enabled = false` gives plain fmt logs to the console without
+OTLP (handy locally without a running Jaeger).
 
 ```powershell
 cargo test -p auth-telemetry

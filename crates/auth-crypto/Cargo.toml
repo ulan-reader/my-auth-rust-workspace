@@ -5,7 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "..."
+description = "Crypto adapters for auth-core: Argon2id passwords, Ed25519 JWT with JWKS, refresh tokens"
+keywords.workspace = true
+categories.workspace = true
 
 [lints]
 workspace = true

@@ -5,7 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "..."
+description = "Postgres (sqlx) adapter for auth-core: repositories, transactions, migrations"
+keywords.workspace = true
+categories.workspace = true
 
 [lints]
 workspace = true

@@ -1,26 +1,27 @@
+**English** | [Русский](README.ru.md) | [Қазақша](README.kk.md)
+
 # auth-crypto
 
-Реализации крипто-портов `auth-core`.
+Implementations of the `auth-core` crypto ports.
 
-- `Argon2PasswordHasher` — Argon2id, параметры (`m_cost`/`t_cost`/`p_cost`)
-  настраиваются через `Argon2Config`. Хеш CPU-тяжёлый, поэтому каждый вызов
-  уходит в `spawn_blocking`. `verify_dummy` считает хеш от dummy-пароля один
-  раз при старте и сверяется с ним — время ответа на несуществующий email не
-  отличается от времени на неверный пароль.
-- `JwtCodec` — EdDSA (Ed25519): подписывает access-токены текущим ключом
-  (`kid` в заголовке) и принимает ещё и ключи из `extra_verification_keys` —
-  на время ротации. Публичные ключи отдаёт в формате JWKS (`jwks()`).
-  Срок жизни токена (`exp`) проверяется вручную по переданному `now`, а не
-  системными часами — так `authenticate` в core остаётся детерминированно
-  тестируемым.
-- `Ed25519Verifier` — только проверка, без приватного ключа: собирается из
-  JWKS (`from_jwks_json`) для сторонних сервисов.
-- `generate_signing_key()` — новый seed Ed25519 и публичный ключ (base64url),
-  за ней стоит `auth-server jwt-keygen`.
-- `Sha256RefreshTokenProvider` — 32 случайных байта (base64url), в БД
-  хранится SHA-256 от токена, не сам токен.
+- `Argon2PasswordHasher` — Argon2id; the parameters (`m_cost` / `t_cost` /
+  `p_cost`) are set through `Argon2Config`. Hashing is CPU-heavy, so every call
+  goes to `spawn_blocking`. `verify_dummy` computes the hash of a dummy password
+  once at start-up and verifies against it — the response time for a
+  non-existent email matches the one for a wrong password.
+- `JwtCodec` — EdDSA (Ed25519): signs access tokens with the current key (`kid`
+  in the header) and also accepts the keys from `extra_verification_keys` during
+  rotation. Publishes the public keys as JWKS (`jwks()`). Token expiry (`exp`) is
+  checked by hand against the passed `now`, not the system clock — so
+  `authenticate` in core stays deterministically testable.
+- `Ed25519Verifier` — verification only, no private key: built from JWKS
+  (`from_jwks_json`) for other services.
+- `generate_signing_key()` — a new Ed25519 seed and its public key (base64url);
+  it backs `auth-server jwt-keygen`.
+- `Sha256RefreshTokenProvider` — 32 random bytes (base64url); the DB stores the
+  SHA-256 of the token, never the token itself.
 
-## Тесты
+## Tests
 
 ```powershell
 cargo test -p auth-crypto
