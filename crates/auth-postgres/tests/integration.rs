@@ -536,3 +536,200 @@ async fn two_admins_cannot_remove_each_other_concurrently() {
 
     drop(tx);
 }
+
+// ---------- транзакции ----------
+
+#[tokio::test]
+async fn uncommitted_rows_are_invisible_and_dropped_tx_rolls_back() {
+    let (_c, pool) = spin_up().await;
+    let users = PgUserRepository::new(pool.clone());
+    let uow = PgUnitOfWork::new(pool);
+    let email = Email::parse("tx@example.com").unwrap();
+
+    let mut tx = begin_tx(&uow).await.unwrap();
+    users
+        .create(&mut *tx, &new_user("tx@example.com"))
+        .await
+        .unwrap();
+    // find_* ходят через пул (другое соединение) — чужое незакоммиченное не видят
+    assert!(users.find_credentials_by_email(&email).await.unwrap().is_none());
+    drop(tx);
+    assert!(users.find_credentials_by_email(&email).await.unwrap().is_none());
+
+    let mut tx = begin_tx(&uow).await.unwrap();
+    users
+        .create(&mut *tx, &new_user("tx@example.com"))
+        .await
+        .unwrap();
+    commit_tx(tx).await.unwrap();
+    assert!(users.find_credentials_by_email(&email).await.unwrap().is_some());
+}
+
+/// Повторяет форму use-case'а: шаг упал -> `?` -> tx дропается, не дойдя до commit.
+async fn create_then_fail(users: &PgUserRepository, uow: &PgUnitOfWork) -> auth_core::Result<()> {
+    let mut tx = uow.begin().await?;
+    users.create(&mut *tx, &new_user("first@example.com")).await?;
+    users.create(&mut *tx, &new_user("first@example.com")).await?; // Conflict
+    tx.commit().await
+}
+
+#[tokio::test]
+async fn error_in_later_step_rolls_back_earlier_steps() {
+    let (_c, pool) = spin_up().await;
+    let users = PgUserRepository::new(pool.clone());
+    let uow = PgUnitOfWork::new(pool);
+
+    assert!(matches!(
+        create_then_fail(&users, &uow).await,
+        Err(AuthError::Conflict)
+    ));
+
+    let email = Email::parse("first@example.com").unwrap();
+    assert!(users.find_credentials_by_email(&email).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn admin_guard_rejection_leaves_last_admin_active() {
+    let (_c, pool) = spin_up().await;
+    let users = PgUserRepository::new(pool.clone());
+    let roles = PgRoleRepository::new(pool.clone());
+    let assignments = PgAssignmentRepository::new(pool.clone());
+    let uow = PgUnitOfWork::new(pool);
+
+    let mut tx = begin_tx(&uow).await.unwrap();
+    let admin = users
+        .create(&mut *tx, &new_user("only-admin@example.com"))
+        .await
+        .unwrap();
+    let role = roles
+        .create(
+            &mut *tx,
+            &NewRole {
+                code: auth_core::domain::RoleCode::parse("admin").unwrap(),
+                name: "Admin".into(),
+                scope: RoleScope::Global,
+            },
+        )
+        .await
+        .unwrap();
+    assignments
+        .assign(&mut *tx, admin.id, role.id, None)
+        .await
+        .unwrap();
+    commit_tx(tx).await.unwrap();
+
+    let mut tx = begin_tx(&uow).await.unwrap();
+    assert!(matches!(
+        users.set_active(&mut *tx, admin.id, false).await,
+        Err(AuthError::Validation(_))
+    ));
+    drop(tx);
+
+    assert!(users.find_by_id(admin.id).await.unwrap().unwrap().is_active);
+}
+
+#[tokio::test]
+async fn set_permissions_returns_set_written_in_tx() {
+    let (_c, pool) = spin_up().await;
+    let roles = PgRoleRepository::new(pool.clone());
+    let permissions = PgPermissionRepository::new(pool.clone());
+    let uow = PgUnitOfWork::new(pool);
+
+    let mut tx = begin_tx(&uow).await.unwrap();
+    let role = roles
+        .create(
+            &mut *tx,
+            &NewRole {
+                code: auth_core::domain::RoleCode::parse("editor").unwrap(),
+                name: "Editor".into(),
+                scope: RoleScope::Global,
+            },
+        )
+        .await
+        .unwrap();
+    commit_tx(tx).await.unwrap();
+
+    let wanted = permissions.list().await.unwrap()[0].id;
+
+    let mut tx = begin_tx(&uow).await.unwrap();
+    let returned = roles
+        .set_permissions(&mut *tx, role.id, &[wanted])
+        .await
+        .unwrap();
+    assert_eq!(
+        returned.iter().map(|p| p.id.0).collect::<Vec<_>>(),
+        vec![wanted.0]
+    );
+    commit_tx(tx).await.unwrap();
+}
+
+struct NotPgTx;
+
+#[async_trait::async_trait]
+impl auth_core::ports::Tx for NotPgTx {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    async fn commit(self: Box<Self>) -> auth_core::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn foreign_tx_is_rejected() {
+    // connect_lazy не подключается, пока нет запроса — Docker не нужен
+    let pool = PgPool::connect_lazy("postgres://unused@localhost/unused").unwrap();
+    let users = PgUserRepository::new(pool);
+
+    let result = users
+        .create(&mut NotPgTx, &new_user("foreign@example.com"))
+        .await;
+
+    assert!(matches!(result, Err(AuthError::Internal(_))));
+}
+
+// ---------- права admin и register_permission ----------
+
+#[tokio::test]
+async fn permission_added_after_setup_is_granted_to_admin() {
+    let (_c, pool) = spin_up().await;
+    let setup = PgSetupRepository::new(pool.clone());
+    let permissions = PgPermissionRepository::new(pool.clone());
+
+    let admin = setup
+        .create_first_admin(&new_user("root@example.com"), Utc::now())
+        .await
+        .unwrap();
+
+    sqlx::query("select register_permission('wiki.post.create', 'Создание постов в вики')")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let granted = permissions.effective_for_user(admin.id, None).await.unwrap();
+    assert!(granted.contains(&auth_core::domain::PermissionCode::parse("wiki.post.create").unwrap()));
+}
+
+#[tokio::test]
+async fn register_permission_validates_code_and_is_idempotent() {
+    let (_c, pool) = spin_up().await;
+
+    let bad = sqlx::query("select register_permission('Wiki.Post', 'x')")
+        .execute(&pool)
+        .await;
+    assert!(bad.is_err(), "код с заглавными буквами не должен попасть в таблицу");
+
+    for description in ["старое описание", "новое описание"] {
+        sqlx::query("select register_permission('wiki.read', $1)")
+            .bind(description)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    let all = PgPermissionRepository::new(pool).list().await.unwrap();
+    let wiki: Vec<_> = all.iter().filter(|p| p.code.as_str() == "wiki.read").collect();
+    assert_eq!(wiki.len(), 1, "повторный вызов не создаёт дубликат");
+    assert_eq!(wiki[0].description, "новое описание");
+}

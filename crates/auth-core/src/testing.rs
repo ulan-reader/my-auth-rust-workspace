@@ -3,7 +3,7 @@
 
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicI64, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
 };
 
 use async_trait::async_trait;
@@ -17,37 +17,66 @@ use crate::{
     service::{AccessService, AuthPolicy, AuthService},
 };
 
-// --------транкзации--------
+// ---------- транзакции ----------
 
-pub struct MemTx;
-#[async_trait::async_trait]
+/// Mem-репозитории пишут сразу, откатить их нельзя — атомарность проверяют
+/// интеграционные тесты auth-postgres. Здесь только считаем begin/commit:
+/// коммитит ли сервис и не открывает ли транзакцию, когда отказывает на проверках.
+#[derive(Default)]
+pub struct MemUnitOfWork {
+    begun: AtomicU64,
+    committed: Arc<AtomicU64>,
+    fail_commit: AtomicBool,
+}
+
+impl MemUnitOfWork {
+    pub fn begun(&self) -> u64 {
+        self.begun.load(Ordering::SeqCst)
+    }
+
+    pub fn committed(&self) -> u64 {
+        self.committed.load(Ordering::SeqCst)
+    }
+
+    /// Все следующие `commit` вернут `Internal` — как если бы БД упала на коммите.
+    pub fn fail_commits(&self) {
+        self.fail_commit.store(true, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl UnitOfWork for MemUnitOfWork {
+    async fn begin(&self) -> Result<Box<dyn Tx>> {
+        self.begun.fetch_add(1, Ordering::SeqCst);
+        Ok(Box::new(MemTx {
+            committed: self.committed.clone(),
+            fail_commit: self.fail_commit.load(Ordering::SeqCst),
+        }))
+    }
+}
+
+pub struct MemTx {
+    committed: Arc<AtomicU64>,
+    fail_commit: bool,
+}
+
+#[async_trait]
 impl Tx for MemTx {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
 
     async fn commit(self: Box<Self>) -> Result<()> {
+        if self.fail_commit {
+            return Err(AuthError::internal(std::io::Error::other(
+                "commit отклонён заглушкой",
+            )));
+        }
+        self.committed.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 }
 
-#[derive(Default)]
-pub struct MemUnitOfWork;
-
-#[async_trait]
-impl UnitOfWork for MemUnitOfWork {
-    async fn begin(&self) -> Result<Box<dyn Tx>> {
-        Ok(Box::new(MemTx))
-    }
-}
-
-#[tokio::test]
-async fn mem_unit_of_work_can_begin_and_commit() {
-    let uow = MemUnitOfWork;
-
-    let tx = uow.begin().await.unwrap();
-    tx.commit().await.unwrap();
-}
 // ---------- часы ----------
 
 pub struct FakeClock(Mutex<DateTime<Utc>>);
@@ -510,7 +539,7 @@ impl Harness {
         let sessions = Arc::new(MemSessions::default());
         let hasher = Arc::new(FakeHasher::default());
         let permissions = Arc::new(MemPermissions::default());
-        let uow = Arc::new(MemUnitOfWork);
+        let uow = Arc::new(MemUnitOfWork::default());
 
         let auth = AuthService::new(
             users.clone(),

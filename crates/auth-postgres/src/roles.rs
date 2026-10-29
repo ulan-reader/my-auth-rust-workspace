@@ -187,17 +187,17 @@ impl RoleRepository for PgRoleRepository {
         role: RoleId,
         permission_ids: &[PermissionId],
     ) -> Result<Vec<Permission>> {
+        let conn = PgTx::from_dyn(tx)?.conn();
         let role_exists: bool =
-            sqlx::query_scalar("select exists(select 1 from roles where id = $1)")
+            sqlx::query_scalar("select exists(select 1 from roles where id = $1 for update)")
                 .bind(role.0)
-                .fetch_one(&self.pool)
+                .fetch_one(&mut *conn)
                 .await
                 .map_err(map_db_error)?;
         if !role_exists {
             return Err(AuthError::NotFound);
         }
 
-        let conn = PgTx::from_dyn(tx)?.conn();
         sqlx::query("delete from role_permissions where role_id = $1")
             .bind(role.0)
             .execute(&mut *conn)
@@ -228,7 +228,7 @@ impl RoleRepository for PgRoleRepository {
             "#,
         )
         .bind(role.0)
-        .fetch_all(&self.pool)
+        .fetch_all(conn)
         .await
         .map_err(map_db_error)?;
         rows.into_iter()

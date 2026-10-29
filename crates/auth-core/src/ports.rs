@@ -5,8 +5,17 @@
 //! - «записи нет»: `Ok(None)` для `find_*`, `Err(NotFound)` для операций над конкретной записью;
 //! - нарушение уникальности -> `Conflict`, битая ссылка (FK) -> `Validation`;
 //! - всё остальное (БД, сеть, крипто) -> `AuthError::internal(..)`.
+//!
+//! Транзакции:
+//! - пишущие методы принимают `&mut dyn Tx` и работают внутри неё; сами не коммитят;
+//! - читающие (`find_*`, `list*`) идут мимо транзакции и не видят её незакоммиченных изменений;
+//! - если метод вернул ошибку, вызывающий не должен коммитить: `Tx`, сброшенная без
+//!   `commit`, откатывается — так «откатываются изменения» во всех контрактах ниже.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    any::Any,
+    collections::{HashMap, HashSet},
+};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -14,15 +23,25 @@ use secrecy::SecretString;
 
 use crate::{Result, domain::*};
 
-// Добавляю транкзацию
-use std::any::Any;
+// ===================== ТРАНЗАКЦИИ =====================
 
+/// Открытая транзакция хранилища. Ядро её не разглядывает — только передаёт
+/// в методы репозиториев и в конце коммитит.
+///
+/// Без `commit` (ранний выход по `?`, паника) транзакция откатывается при drop.
+/// Передавать `Tx` можно только в репозитории того же адаптера, который её создал;
+/// чужая -> `Internal`.
 #[async_trait]
 pub trait Tx: Send {
-    fn as_any_mut(&mut self) -> &mut dyn Any; // нужно, чтобы адаптер мог «скастить»
+    /// Для адаптера: достать из `dyn Tx` свой конкретный тип (`downcast_mut`).
+    /// Ядро этим не пользуется.
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+
     async fn commit(self: Box<Self>) -> Result<()>;
 }
 
+/// Фабрика транзакций. Один use-case — одна транзакция:
+/// `begin` -> вызовы репозиториев с `&mut *tx` -> `commit`.
 #[async_trait]
 pub trait UnitOfWork: Send + Sync {
     async fn begin(&self) -> Result<Box<dyn Tx>>;
@@ -174,12 +193,12 @@ pub trait UserRepository: Send + Sync {
     ) -> Result<()>;
 
     /// Не может оставить систему без активного администратора: если до операции
-    /// админ был, а после не осталось ни одного — `Validation`, изменения откатываются.
+    /// админ был, а после не осталось ни одного — `Validation` (транзакцию не коммитить).
     async fn set_active(&self, tx: &mut dyn Tx, id: UserId, active: bool) -> Result<()>;
 
-    /// Атомарно вместе с назначениями ролей и сессиями пользователя.
+    /// Назначения ролей и сессии пользователя удаляются вместе с ним, в той же `tx`.
     /// Не может оставить систему без активного администратора: если до операции
-    /// админ был, а после не осталось ни одного — `Validation`, изменения откатываются.
+    /// админ был, а после не осталось ни одного — `Validation` (транзакцию не коммитить).
     async fn delete(&self, tx: &mut dyn Tx, id: UserId) -> Result<()>;
 }
 
@@ -194,12 +213,13 @@ pub trait RoleRepository: Send + Sync {
 
     async fn update(&self, tx: &mut dyn Tx, id: RoleId, upd: &RoleUpdate) -> Result<Role>;
 
-    /// Атомарно вместе с назначениями и правами роли.
+    /// Назначения и права роли удаляются вместе с ней, в той же `tx`.
     async fn delete(&self, tx: &mut dyn Tx, id: RoleId) -> Result<()>;
 
     async fn permissions_of(&self, role: RoleId) -> Result<Vec<Permission>>;
 
-    /// Атомарно заменяет набор прав роли. Неизвестный `PermissionId` -> `Validation`.
+    /// Заменяет набор прав роли и возвращает новый набор (видимый внутри `tx`).
+    /// Нет роли -> `NotFound`; неизвестный `PermissionId` -> `Validation`.
     async fn set_permissions(
         &self,
         tx: &mut dyn Tx,
@@ -225,7 +245,7 @@ pub trait AssignmentRepository: Send + Sync {
 
     /// Идемпотентно: отсутствие назначения — не ошибка.
     /// Не может оставить систему без активного администратора: если до операции
-    /// админ был, а после не осталось ни одного — `Validation`, изменения откатываются.
+    /// админ был, а после не осталось ни одного — `Validation` (транзакцию не коммитить).
     async fn unassign(
         &self,
         tx: &mut dyn Tx,
@@ -268,7 +288,7 @@ pub trait SessionRepository: Send + Sync {
 
     async fn list_active(&self, user: UserId, now: DateTime<Utc>) -> Result<Vec<Session>>;
 
-    /// Ротация refresh-токена: в одной транзакции отзывает `old` и создаёт `next`.
+    /// Ротация refresh-токена: внутри `tx` блокирует и отзывает `old`, создаёт `next`.
     /// Если `old` уже отозвана (гонка, двойное использование) -> `Conflict`.
     async fn rotate(
         &self,
@@ -371,8 +391,10 @@ pub trait SettingsRepository: Send + Sync {
 pub trait SetupRepository: Send + Sync {
     async fn is_completed(&self) -> Result<bool>;
 
-    /// В ОДНОЙ транзакции: блокирует строку настроек, проверяет, что настройка не
-    /// выполнена и админа нет; создаёт роль `admin` (если её нет) со всеми правами,
+    /// Сам открывает и коммитит транзакцию (не принимает `Tx`): операция
+    /// самодостаточна и ни с чем снаружи не комбинируется.
+    /// Внутри: блокирует строку настроек, проверяет, что настройка не выполнена
+    /// и админа нет; создаёт роль `admin` (если её нет) со всеми правами,
     /// пользователя, назначение и ставит отметку о завершении.
     /// Уже выполнена (в т.ч. параллельным запросом) -> `NotFound`; email занят -> `Conflict`.
     async fn create_first_admin(&self, new: &NewUser, now: DateTime<Utc>) -> Result<User>;
@@ -420,8 +442,9 @@ mod tests {
             _: Option<Arc<dyn AccessTokenCodec>>,
             _: Option<Arc<dyn RefreshTokenProvider>>,
             _: Option<Arc<dyn Clock>>,
+            _: Option<Arc<dyn UnitOfWork>>,
         ) {
         }
-        accepts(None, None, None, None, None, None, None, None, None);
+        accepts(None, None, None, None, None, None, None, None, None, None);
     }
 }

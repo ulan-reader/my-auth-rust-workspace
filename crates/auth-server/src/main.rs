@@ -160,13 +160,18 @@ async fn session_cleanup(
         let Some(before) = Utc::now().checked_sub_signed(retention) else {
             continue; // retention длиннее эпохи — удалять нечего
         };
-        let _result = async {
+        let result = async {
             let mut tx = uow.begin().await?;
-            let deleted = sessions.purge_stale(tx.as_mut(), before).await?;
+            let deleted = sessions.purge_stale(&mut *tx, before).await?;
             tx.commit().await?;
             Ok::<_, AuthError>(deleted)
         }
         .await;
+
+        match result {
+            Ok(deleted) => info!(deleted, "очистка устаревших сессий завершена"),
+            Err(error) => tracing::error!(%error, "не удалось очистить устаревшие сессии"),
+        }
     }
     info!("воркер очистки сессий остановлен");
 }

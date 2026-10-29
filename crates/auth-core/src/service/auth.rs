@@ -278,10 +278,10 @@ impl AuthService {
     pub async fn logout(&self, refresh_token: &SecretString) -> Result<()> {
         let now = self.clock.now();
         let hash = self.refresh_tokens.hash(refresh_token);
-        let mut tx = self.uow.begin().await?;
         if let Some(session) = self.sessions.find_by_token_hash(&hash).await?
             && session.is_active(now)
         {
+            let mut tx = self.uow.begin().await?;
             match self
                 .sessions
                 .revoke(&mut *tx, session.user_id, session.id, now)
@@ -290,8 +290,8 @@ impl AuthService {
                 Ok(()) | Err(AuthError::NotFound) => {}
                 Err(e) => return Err(e),
             }
+            tx.commit().await?;
         }
-        tx.commit().await?;
         Ok(())
     }
 
@@ -457,6 +457,24 @@ mod tests {
 
     use super::*;
     use crate::testing::Harness;
+
+    #[tokio::test]
+    async fn login_commits_once_and_failed_login_opens_no_transaction() {
+        let h = Harness::new();
+        h.users.seed("u@example.com", "user-password", true);
+
+        assert!(matches!(
+            h.auth.login("u@example.com", &pw("wrong-password")).await,
+            Err(AuthError::InvalidCredentials)
+        ));
+        assert_eq!(h.uow.begun(), 0, "неверный пароль не должен трогать БД на запись");
+
+        h.auth
+            .login("u@example.com", &pw("user-password"))
+            .await
+            .unwrap();
+        assert_eq!((h.uow.begun(), h.uow.committed()), (1, 1));
+    }
 
     fn pw(s: &str) -> SecretString {
         SecretString::from(s)

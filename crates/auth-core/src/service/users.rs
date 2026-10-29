@@ -330,6 +330,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejected_requests_open_no_transaction() {
+        let f = fixture();
+        let target = f.h.users.seed("t@example.com", "t-password", true);
+
+        assert!(matches!(
+            f.svc.set_password(&f.admin, target.id, &pw("short")).await,
+            Err(AuthError::Validation(_))
+        ));
+        assert!(matches!(
+            f.svc.set_active(&f.admin, f.admin.user_id(), false).await,
+            Err(AuthError::Validation(_))
+        ));
+        assert!(matches!(
+            f.svc.delete(&f.admin, f.admin.user_id()).await,
+            Err(AuthError::Validation(_))
+        ));
+
+        assert_eq!(f.h.uow.begun(), 0);
+    }
+
+    #[tokio::test]
+    async fn failed_commit_is_returned_to_caller() {
+        let f = fixture();
+        let target = f.h.users.seed("t@example.com", "t-password", true);
+        f.h.uow.fail_commits();
+
+        let result = f
+            .svc
+            .set_password(&f.admin, target.id, &pw("brand-new-pass"))
+            .await;
+
+        assert!(matches!(result, Err(AuthError::Internal(_))));
+        assert_eq!((f.h.uow.begun(), f.h.uow.committed()), (1, 0));
+    }
+
+    #[tokio::test]
     async fn create_normalizes_hashes_and_enforces_rules() {
         let f = fixture();
 
