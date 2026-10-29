@@ -153,6 +153,13 @@ pub struct RoleUpdate {
     pub name: String,
 }
 
+/// Роль вместе с её правами, прочитанными под блокировкой (см. `RoleRepository::lock`).
+#[derive(Debug, Clone)]
+pub struct LockedRole {
+    pub role: Role,
+    pub permissions: Vec<Permission>,
+}
+
 #[derive(Debug, Clone)]
 pub struct NewSession {
     pub user_id: UserId,
@@ -205,6 +212,13 @@ pub trait UserRepository: Send + Sync {
 #[async_trait]
 pub trait RoleRepository: Send + Sync {
     async fn find_by_id(&self, id: RoleId) -> Result<Option<Role>>;
+
+    /// Блокирует роль до конца `tx` и читает её права уже под блокировкой.
+    /// Сервис берёт её перед любой правкой роли, её прав или назначений — поэтому
+    /// параллельные операции над одной ролью идут по очереди, а проверки сервиса
+    /// («у актора есть все права роли», «это не admin») остаются верными до commit.
+    /// Роли нет -> `Ok(None)`.
+    async fn lock(&self, tx: &mut dyn Tx, id: RoleId) -> Result<Option<LockedRole>>;
 
     async fn list(&self, req: &PageRequest) -> Result<Page<Role>>;
 

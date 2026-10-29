@@ -1,15 +1,16 @@
 //! Управление ролями: CRUD, права роли, назначение/снятие с пользователей.
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use tracing::{Level, instrument};
 
-use super::{AccessService, AuthContext, Ports, admin_permissions as perm};
+use super::{AccessService, AuthContext, Ports, access::require_subset, admin_permissions as perm};
 use crate::{
     AuthError, Result,
     domain::*,
     ports::{
-        AssignmentRepository, NewRole, Page, PageRequest, RoleRepository, RoleUpdate, UnitOfWork,
+        AssignmentRepository, LockedRole, NewRole, Page, PageRequest, RoleRepository, RoleUpdate,
+        UnitOfWork,
     },
 };
 
@@ -114,26 +115,27 @@ impl RoleService {
         self.access
             .require_permission(actor, perm::ROLES_MANAGE, None)
             .await?;
-
-        self.require_holds_role(actor, id, None).await?;
-        let current = self
-            .roles
-            .find_by_id(id)
-            .await?
-            .ok_or(AuthError::NotFound)?;
-        if current.code.as_str() == ADMIN_ROLE_CODE && input.code.trim() != ADMIN_ROLE_CODE {
-            return Err(AuthError::validation(
-                "код системной роли admin менять нельзя",
-            ));
-        }
+        let granted = self.access.granted(actor, None).await?;
 
         let upd = RoleUpdate {
             code: RoleCode::parse(&input.code)?,
             name: clean_name(&input.name)?,
         };
-
+        
         let mut tx = self.uow.begin().await?;
-        let role: Role = self.roles.update(&mut *tx, id, &upd).await?;
+        let locked = self
+            .roles
+            .lock(&mut *tx, id)
+            .await?
+            .ok_or(AuthError::NotFound)?;
+        require_holds(&granted, &locked)?;
+        if locked.role.code.as_str() == ADMIN_ROLE_CODE && input.code.trim() != ADMIN_ROLE_CODE {
+            return Err(AuthError::validation(
+                "код системной роли admin менять нельзя",
+            ));
+        }
+
+        let role = self.roles.update(&mut *tx, id, &upd).await?;
         tx.commit().await?;
         Ok(role)
     }
@@ -144,15 +146,16 @@ impl RoleService {
         self.access
             .require_permission(actor, perm::ROLES_MANAGE, None)
             .await?;
+        let granted = self.access.granted(actor, None).await?;
 
-        self.require_holds_role(actor, id, None).await?;
-        let current = self
+        let mut tx = self.uow.begin().await?;
+        let locked = self
             .roles
-            .find_by_id(id)
+            .lock(&mut *tx, id)
             .await?
             .ok_or(AuthError::NotFound)?;
-        ensure_not_system(&current, "удалить")?;
-        let mut tx = self.uow.begin().await?;
+        require_holds(&granted, &locked)?;
+        ensure_not_system(&locked.role, "удалить")?;
         self.roles.delete(&mut *tx, id).await?;
         tx.commit().await
     }
@@ -180,85 +183,73 @@ impl RoleService {
         self.access
             .require_permission(actor, perm::ROLES_MANAGE, None)
             .await?;
-
-        self.require_holds_role(actor, role, None).await?;
+        let granted = self.access.granted(actor, None).await?;
         let wanted = self.access.codes_of(permission_ids).await?;
-        self.access.require_all(actor, &wanted, None).await?;
-        let current = self
-            .roles
-            .find_by_id(role)
-            .await?
-            .ok_or(AuthError::NotFound)?;
-        ensure_not_system(&current, "редактировать по правам: у неё всегда все права")?;
+        require_subset(&granted, &wanted)?;
 
         let mut tx = self.uow.begin().await?;
-
-        let roles = self
+        let locked = self
+            .roles
+            .lock(&mut *tx, role)
+            .await?
+            .ok_or(AuthError::NotFound)?;
+        require_holds(&granted, &locked)?;
+        ensure_not_system(
+            &locked.role,
+            "редактировать по правам: у неё всегда все права",
+        )?;
+        let permissions = self
             .roles
             .set_permissions(&mut *tx, role, permission_ids)
             .await?;
-
         tx.commit().await?;
-        Ok(roles)
+        Ok(permissions)
     }
 
     /// Назначает роль пользователю. Соответствие `role.scope` и `input.scope`
     /// проверяется по домену (`RoleScope::check_assignment`), не по адаптеру.
     #[instrument(skip_all, fields(actor = %actor.user_id()), err(level = Level::WARN))]
     pub async fn assign(&self, actor: &AuthContext, input: AssignRole) -> Result<()> {
-        self.access
-            .require_permission(actor, perm::ROLES_ASSIGN, None)
-            .await?;
-
-        let role = self
-            .roles
-            .find_by_id(input.role)
-            .await?
-            .ok_or(AuthError::NotFound)?;
+        // право на назначение проверяем в том scope, куда назначаем:
+        // админ раздела раздаёт роли только у себя
         let scope = input.scope.as_deref().map(ScopeId::parse).transpose()?;
-        role.scope.check_assignment(scope.as_ref())?;
-
-        self.require_holds_role(actor, role.id, scope.as_ref())
+        self.access
+            .require_permission(actor, perm::ROLES_ASSIGN, scope.as_ref())
             .await?;
+        let granted = self.access.granted(actor, scope.as_ref()).await?;
 
         let mut tx = self.uow.begin().await?;
-
+        let locked = self
+            .roles
+            .lock(&mut *tx, input.role)
+            .await?
+            .ok_or(AuthError::NotFound)?;
+        locked.role.scope.check_assignment(scope.as_ref())?;
+        require_holds(&granted, &locked)?;
         self.assignments
             .assign(&mut *tx, input.user, input.role, scope.as_ref())
             .await?;
-
         tx.commit().await
     }
 
     /// Идемпотентно: отсутствие назначения — не ошибка.
     #[instrument(skip_all, fields(actor = %actor.user_id()), err(level = Level::WARN))]
     pub async fn unassign(&self, actor: &AuthContext, input: AssignRole) -> Result<()> {
-        self.access
-            .require_permission(actor, perm::ROLES_ASSIGN, None)
-            .await?;
-
         let scope = input.scope.as_deref().map(ScopeId::parse).transpose()?;
-        self.require_holds_role(actor, input.role, scope.as_ref())
+        self.access
+            .require_permission(actor, perm::ROLES_ASSIGN, scope.as_ref())
             .await?;
+        let granted = self.access.granted(actor, scope.as_ref()).await?;
+
         let mut tx = self.uow.begin().await?;
+        let Some(locked) = self.roles.lock(&mut *tx, input.role).await? else {
+            return Ok(()); // нет роли — нет и назначения: идемпотентно, как и раньше
+        };
+        require_holds(&granted, &locked)?;
         self.assignments
             .unassign(&mut *tx, input.user, input.role, scope.as_ref())
             .await?;
         tx.commit().await
-    }
-
-    /// Трогать роль можно, только если у тебя есть все её права: иначе через
-    /// назначение или правку роли можно поднять себе (или снять с других) чужие права.
-    async fn require_holds_role(
-        &self,
-        actor: &AuthContext,
-        role: RoleId,
-        scope: Option<&ScopeId>,
-    ) -> Result<()> {
-        let perms = self.roles.permissions_of(role).await?;
-        self.access
-            .require_all(actor, perms.iter().map(|p| &p.code), scope)
-            .await
     }
 }
 
@@ -283,6 +274,12 @@ fn ensure_not_system(role: &Role, action: &str) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Трогать роль можно, только если у тебя есть все её права: иначе через
+/// назначение или правку роли можно поднять себе (или снять с других) чужие права.
+fn require_holds(granted: &HashSet<PermissionCode>, role: &LockedRole) -> Result<()> {
+    require_subset(granted, role.permissions.iter().map(|p| &p.code))
 }
 
 #[cfg(test)]
@@ -317,6 +314,69 @@ mod tests {
             svc,
             admin: ctx(admin),
         }
+    }
+
+    #[tokio::test]
+    async fn scope_admin_assigns_only_inside_own_scope() {
+        let f = fixture();
+        let editor = f
+            .svc
+            .create(
+                &f.admin,
+                CreateRole {
+                    code: "wiki_editor".into(),
+                    name: "Wiki editor".into(),
+                    scope: RoleScope::Scoped,
+                },
+            )
+            .await
+            .unwrap();
+        let viewer = f
+            .svc
+            .create(
+                &f.admin,
+                CreateRole {
+                    code: "viewer".into(),
+                    name: "Viewer".into(),
+                    scope: RoleScope::Global,
+                },
+            )
+            .await
+            .unwrap();
+
+        let wiki_admin = f.h.users.seed("wiki-admin@example.com", "password-1", true);
+        f.h.permissions
+            .grant(wiki_admin.id, Some("space:wiki"), perm::ROLES_ASSIGN);
+        let wiki_admin = ctx(wiki_admin);
+        let user = f.h.users.seed("user@example.com", "password-1", true);
+        let assign = |role: RoleId, scope: Option<&str>| AssignRole {
+            user: user.id,
+            role,
+            scope: scope.map(Into::into),
+        };
+
+        // в своём разделе — можно, в том числе снять
+        f.svc
+            .assign(&wiki_admin, assign(editor.id, Some("space:wiki")))
+            .await
+            .unwrap();
+        f.svc
+            .unassign(&wiki_admin, assign(editor.id, Some("space:wiki")))
+            .await
+            .unwrap();
+
+        // в чужом разделе — нельзя
+        assert!(matches!(
+            f.svc
+                .assign(&wiki_admin, assign(editor.id, Some("space:hr")))
+                .await,
+            Err(AuthError::Forbidden)
+        ));
+        // глобальную роль — нельзя
+        assert!(matches!(
+            f.svc.assign(&wiki_admin, assign(viewer.id, None)).await,
+            Err(AuthError::Forbidden)
+        ));
     }
 
     #[tokio::test]

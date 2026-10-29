@@ -467,7 +467,11 @@ mod tests {
             h.auth.login("u@example.com", &pw("wrong-password")).await,
             Err(AuthError::InvalidCredentials)
         ));
-        assert_eq!(h.uow.begun(), 0, "неверный пароль не должен трогать БД на запись");
+        assert_eq!(
+            h.uow.begun(),
+            0,
+            "неверный пароль не должен трогать БД на запись"
+        );
 
         h.auth
             .login("u@example.com", &pw("user-password"))

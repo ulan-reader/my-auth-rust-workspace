@@ -552,9 +552,21 @@ async fn uncommitted_rows_are_invisible_and_dropped_tx_rolls_back() {
         .await
         .unwrap();
     // find_* ходят через пул (другое соединение) — чужое незакоммиченное не видят
-    assert!(users.find_credentials_by_email(&email).await.unwrap().is_none());
+    assert!(
+        users
+            .find_credentials_by_email(&email)
+            .await
+            .unwrap()
+            .is_none()
+    );
     drop(tx);
-    assert!(users.find_credentials_by_email(&email).await.unwrap().is_none());
+    assert!(
+        users
+            .find_credentials_by_email(&email)
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     let mut tx = begin_tx(&uow).await.unwrap();
     users
@@ -562,14 +574,24 @@ async fn uncommitted_rows_are_invisible_and_dropped_tx_rolls_back() {
         .await
         .unwrap();
     commit_tx(tx).await.unwrap();
-    assert!(users.find_credentials_by_email(&email).await.unwrap().is_some());
+    assert!(
+        users
+            .find_credentials_by_email(&email)
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 /// Повторяет форму use-case'а: шаг упал -> `?` -> tx дропается, не дойдя до commit.
 async fn create_then_fail(users: &PgUserRepository, uow: &PgUnitOfWork) -> auth_core::Result<()> {
     let mut tx = uow.begin().await?;
-    users.create(&mut *tx, &new_user("first@example.com")).await?;
-    users.create(&mut *tx, &new_user("first@example.com")).await?; // Conflict
+    users
+        .create(&mut *tx, &new_user("first@example.com"))
+        .await?;
+    users
+        .create(&mut *tx, &new_user("first@example.com"))
+        .await?; // Conflict
     tx.commit().await
 }
 
@@ -585,7 +607,13 @@ async fn error_in_later_step_rolls_back_earlier_steps() {
     ));
 
     let email = Email::parse("first@example.com").unwrap();
-    assert!(users.find_credentials_by_email(&email).await.unwrap().is_none());
+    assert!(
+        users
+            .find_credentials_by_email(&email)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -707,8 +735,13 @@ async fn permission_added_after_setup_is_granted_to_admin() {
         .await
         .unwrap();
 
-    let granted = permissions.effective_for_user(admin.id, None).await.unwrap();
-    assert!(granted.contains(&auth_core::domain::PermissionCode::parse("wiki.post.create").unwrap()));
+    let granted = permissions
+        .effective_for_user(admin.id, None)
+        .await
+        .unwrap();
+    assert!(
+        granted.contains(&auth_core::domain::PermissionCode::parse("wiki.post.create").unwrap())
+    );
 }
 
 #[tokio::test]
@@ -718,7 +751,10 @@ async fn register_permission_validates_code_and_is_idempotent() {
     let bad = sqlx::query("select register_permission('Wiki.Post', 'x')")
         .execute(&pool)
         .await;
-    assert!(bad.is_err(), "код с заглавными буквами не должен попасть в таблицу");
+    assert!(
+        bad.is_err(),
+        "код с заглавными буквами не должен попасть в таблицу"
+    );
 
     for description in ["старое описание", "новое описание"] {
         sqlx::query("select register_permission('wiki.read', $1)")
@@ -729,7 +765,62 @@ async fn register_permission_validates_code_and_is_idempotent() {
     }
 
     let all = PgPermissionRepository::new(pool).list().await.unwrap();
-    let wiki: Vec<_> = all.iter().filter(|p| p.code.as_str() == "wiki.read").collect();
+    let wiki: Vec<_> = all
+        .iter()
+        .filter(|p| p.code.as_str() == "wiki.read")
+        .collect();
     assert_eq!(wiki.len(), 1, "повторный вызов не создаёт дубликат");
     assert_eq!(wiki[0].description, "новое описание");
+}
+
+#[tokio::test]
+async fn role_lock_makes_concurrent_set_permissions_wait() {
+    let (_c, pool) = spin_up().await;
+    let roles = std::sync::Arc::new(PgRoleRepository::new(pool.clone()));
+    let permissions = PgPermissionRepository::new(pool.clone());
+    let uow = PgUnitOfWork::new(pool);
+
+    let mut tx = begin_tx(&uow).await.unwrap();
+    let role = roles
+        .create(
+            &mut *tx,
+            &NewRole {
+                code: auth_core::domain::RoleCode::parse("editor").unwrap(),
+                name: "Editor".into(),
+                scope: RoleScope::Global,
+            },
+        )
+        .await
+        .unwrap();
+    commit_tx(tx).await.unwrap();
+
+    let all = permissions.list().await.unwrap();
+    let (first, second) = (all[0].id, all[1].id);
+
+    // tx1 держит блокировку роли
+    let mut tx1 = begin_tx(&uow).await.unwrap();
+    let locked = roles.lock(&mut *tx1, role.id).await.unwrap().unwrap();
+    assert!(locked.permissions.is_empty());
+
+    // tx2 меняет права той же роли — должна ждать tx1
+    let writer = tokio::spawn({
+        let roles = roles.clone();
+        let uow = uow.clone();
+        async move {
+            let mut tx = uow.begin().await?;
+            roles
+                .set_permissions(&mut *tx, role.id, &[first, second])
+                .await?;
+            tx.commit().await
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(
+        !writer.is_finished(),
+        "set_permissions не должен пройти, пока роль заблокирована"
+    );
+
+    commit_tx(tx1).await.unwrap();
+    writer.await.unwrap().unwrap();
+    assert_eq!(roles.permissions_of(role.id).await.unwrap().len(), 2);
 }

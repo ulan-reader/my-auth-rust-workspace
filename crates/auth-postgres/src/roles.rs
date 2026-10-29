@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use auth_core::{
     AuthError, Result,
     domain::{Permission, PermissionCode, PermissionId, Role, RoleCode, RoleId, RoleScope},
-    ports::{NewRole, Page, PageRequest, RoleRepository, RoleUpdate, Tx},
+    ports::{LockedRole, NewRole, Page, PageRequest, RoleRepository, RoleUpdate, Tx},
 };
 use sqlx::PgPool;
 use tracing::instrument;
@@ -60,6 +60,42 @@ impl PgRoleRepository {
 
 #[async_trait]
 impl RoleRepository for PgRoleRepository {
+    /// `FOR UPDATE` на строке роли: операции другой транзакции над этой же ролью
+    /// ждут нашего commit, а права читаем уже под блокировкой.
+    #[instrument(skip(self, tx), err)]
+    async fn lock(&self, tx: &mut dyn Tx, id: RoleId) -> Result<Option<LockedRole>> {
+        let conn = PgTx::from_dyn(tx)?.conn();
+        let row: Option<RoleRow> =
+            sqlx::query_as("select id, code, name, scope from roles where id = $1 for update")
+                .bind(id.0)
+                .fetch_optional(&mut *conn)
+                .await
+                .map_err(map_db_error)?;
+        let Some(row) = row else { return Ok(None) };
+
+        let permissions: Vec<PermissionRow> = sqlx::query_as(
+            r#"
+            select p.id, p.code, p.description
+            from role_permissions rp
+            join permissions p on p.id = rp.permission_id
+            where rp.role_id = $1
+            order by p.code
+            "#,
+        )
+        .bind(id.0)
+        .fetch_all(conn)
+        .await
+        .map_err(map_db_error)?;
+
+        Ok(Some(LockedRole {
+            role: row.into_role()?,
+            permissions: permissions
+                .into_iter()
+                .map(PermissionRow::into_permission)
+                .collect::<Result<_>>()?,
+        }))
+    }
+
     #[instrument(skip(self), err)]
     async fn find_by_id(&self, id: RoleId) -> Result<Option<Role>> {
         let row: Option<RoleRow> =

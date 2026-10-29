@@ -678,6 +678,16 @@ pub struct MemRoles {
 
 #[async_trait]
 impl RoleRepository for MemRoles {
+    async fn lock(&self, _tx: &mut dyn Tx, id: RoleId) -> Result<Option<LockedRole>> {
+        let Some(role) = self.find_by_id(id).await? else {
+            return Ok(None);
+        };
+        Ok(Some(LockedRole {
+            role,
+            permissions: self.permissions_of(id).await?,
+        }))
+    }
+
     async fn find_by_id(&self, id: RoleId) -> Result<Option<Role>> {
         Ok(self
             .rows

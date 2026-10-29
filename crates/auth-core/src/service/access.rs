@@ -1,6 +1,6 @@
 //! Авторизация: есть ли у аутентифицированного пользователя нужное право.
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use tracing::{Level, instrument};
 
@@ -34,6 +34,19 @@ impl AccessService {
 
     pub fn from_ports(ports: &Ports) -> Self {
         Self::new(ports.permissions.clone())
+    }
+
+    /// Все права `ctx` (глобальные, а для `Some(scope)` — плюс в этом scope).
+    /// Нужен, когда проверять придётся внутри транзакции: читаем заранее, чтобы
+    /// не держать транзакцию открытой и одновременно брать второе соединение из пула.
+    pub async fn granted(
+        &self,
+        ctx: &AuthContext,
+        scope: Option<&ScopeId>,
+    ) -> Result<HashSet<PermissionCode>> {
+        self.permissions
+            .effective_for_user(ctx.user.id, scope)
+            .await
     }
 
     /// `scope = None` — считаются только глобальные роли. `Some(s)` — глобальные
@@ -78,15 +91,7 @@ impl AccessService {
         codes: impl IntoIterator<Item = &'a PermissionCode>,
         scope: Option<&ScopeId>,
     ) -> Result<()> {
-        let granted = self
-            .permissions
-            .effective_for_user(ctx.user.id, scope)
-            .await?;
-        if codes.into_iter().all(|c| granted.contains(c)) {
-            Ok(())
-        } else {
-            Err(AuthError::Forbidden)
-        }
+        require_subset(&self.granted(ctx, scope).await?, codes)
     }
 
     /// Коды прав по id. Неизвестные id пропускаются — их отвергнет адаптер (`Validation`).
@@ -110,6 +115,18 @@ impl AccessService {
         }
         let target_perms = self.permissions.effective_for_user(target, None).await?;
         self.require_all(actor, &target_perms, None).await
+    }
+}
+
+/// Все `codes` должны быть в `granted`, иначе `Forbidden`.
+pub(crate) fn require_subset<'a>(
+    granted: &HashSet<PermissionCode>,
+    codes: impl IntoIterator<Item = &'a PermissionCode>,
+) -> Result<()> {
+    if codes.into_iter().all(|c| granted.contains(c)) {
+        Ok(())
+    } else {
+        Err(AuthError::Forbidden)
     }
 }
 
