@@ -14,7 +14,7 @@
 
 use std::{
     any::Any,
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
 };
 
 use async_trait::async_trait;
@@ -398,7 +398,86 @@ pub trait RefreshTokenProvider: Send + Sync {
 #[async_trait]
 pub trait SettingsRepository: Send + Sync {
     async fn get(&self) -> Result<RuntimeSettings>;
-    async fn set_allow_self_registration(&self, allowed: bool) -> Result<()>;
+    /// В `tx`, чтобы изменение и его запись в аудит коммитились вместе.
+    async fn set_allow_self_registration(&self, tx: &mut dyn Tx, allowed: bool) -> Result<()>;
+}
+
+// ===================== АУДИТ =====================
+
+/// Событие для журнала аудита: кто (`actor`), что сделал (`action`), над чем
+/// (`target_type` + `target_id`), в каком scope и с какими деталями.
+///
+/// Детали — плоские строки, которые сервис кладёт явно. Так в журнал не попадёт
+/// ничего лишнего: ни хеш пароля, ни токен, как было бы при записи строк целиком.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditEvent {
+    /// `None` — действие системы, а не пользователя.
+    pub actor: Option<UserId>,
+    pub action: &'static str,
+    pub target_type: &'static str,
+    pub target_id: Option<i64>,
+    pub scope: Option<ScopeId>,
+    pub details: BTreeMap<String, String>,
+}
+
+impl AuditEvent {
+    pub fn new(
+        actor: Option<UserId>,
+        action: &'static str,
+        target_type: &'static str,
+        target_id: Option<i64>,
+    ) -> Self {
+        Self {
+            actor,
+            action,
+            target_type,
+            target_id,
+            scope: None,
+            details: BTreeMap::new(),
+        }
+    }
+
+    pub fn scope(mut self, scope: Option<&ScopeId>) -> Self {
+        self.scope = scope.cloned();
+        self
+    }
+
+    pub fn detail(mut self, key: &str, value: impl Into<String>) -> Self {
+        self.details.insert(key.to_owned(), value.into());
+        self
+    }
+}
+
+/// Запись журнала, как её читают обратно.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditRecord {
+    pub id: i64,
+    pub at: DateTime<Utc>,
+    pub actor: Option<UserId>,
+    pub action: String,
+    pub target_type: String,
+    pub target_id: Option<i64>,
+    pub scope: Option<ScopeId>,
+    pub details: BTreeMap<String, String>,
+}
+
+/// Фильтр журнала. Пустые поля не фильтруют.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AuditFilter {
+    pub actor: Option<UserId>,
+    pub action: Option<String>,
+    pub target_type: Option<String>,
+    pub target_id: Option<i64>,
+}
+
+#[async_trait]
+pub trait AuditRepository: Send + Sync {
+    /// Пишет в той же `tx`, что и само изменение: откатилось изменение — нет и
+    /// записи; не удалось записать — откатится изменение (транзакцию не коммитить).
+    async fn record(&self, tx: &mut dyn Tx, event: &AuditEvent) -> Result<()>;
+
+    /// Новые сверху. `req.search` не используется.
+    async fn list(&self, filter: &AuditFilter, req: &PageRequest) -> Result<Page<AuditRecord>>;
 }
 
 #[async_trait]
@@ -410,6 +489,7 @@ pub trait SetupRepository: Send + Sync {
     /// Внутри: блокирует строку настроек, проверяет, что настройка не выполнена
     /// и админа нет; создаёт роль `admin` (если её нет) со всеми правами,
     /// пользователя, назначение и ставит отметку о завершении.
+    /// В той же транзакции пишет событие `setup.complete` в журнал аудита.
     /// Уже выполнена (в т.ч. параллельным запросом) -> `NotFound`; email занят -> `Conflict`.
     async fn create_first_admin(&self, new: &NewUser, now: DateTime<Utc>) -> Result<User>;
 }
@@ -457,8 +537,11 @@ mod tests {
             _: Option<Arc<dyn RefreshTokenProvider>>,
             _: Option<Arc<dyn Clock>>,
             _: Option<Arc<dyn UnitOfWork>>,
+            _: Option<Arc<dyn AuditRepository>>,
         ) {
         }
-        accepts(None, None, None, None, None, None, None, None, None, None);
+        accepts(
+            None, None, None, None, None, None, None, None, None, None, None,
+        );
     }
 }

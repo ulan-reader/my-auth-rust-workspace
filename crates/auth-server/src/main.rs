@@ -15,8 +15,8 @@ use auth_core::{
 };
 use auth_crypto::{Argon2PasswordHasher, Jwks, JwtCodec, Sha256RefreshTokenProvider};
 use auth_postgres::{
-    PgAssignmentRepository, PgPermissionRepository, PgPool, PgRoleRepository, PgSessionRepository,
-    PgSettingsRepository, PgSetupRepository, PgUnitOfWork, PgUserRepository,
+    PgAssignmentRepository, PgAuditRepository, PgPermissionRepository, PgPool, PgRoleRepository,
+    PgSessionRepository, PgSettingsRepository, PgSetupRepository, PgUnitOfWork, PgUserRepository,
 };
 use axum::{Json, Router, http::StatusCode, routing::get};
 use chrono::{TimeDelta, Utc};
@@ -97,6 +97,7 @@ async fn main() -> anyhow::Result<()> {
         settings: Arc::new(PgSettingsRepository::new(pool.clone())),
         setup: Arc::new(PgSetupRepository::new(pool.clone())),
         uow: Arc::new(PgUnitOfWork::new(pool.clone())),
+        audit: Arc::new(PgAuditRepository::new(pool.clone())),
     };
 
     let policy = cfg.auth.build().context("auth policy")?;

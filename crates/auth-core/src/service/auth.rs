@@ -6,13 +6,17 @@ use chrono::{DateTime, TimeDelta, Utc};
 use secrecy::SecretString;
 use tracing::{Level, Span, instrument, warn};
 
-use super::Ports;
+use super::{
+    Ports,
+    audit::{audit_actions, audit_targets},
+};
 use crate::{
     AuthError, Result,
     domain::*,
     ports::{
-        AccessTokenCodec, Clock, NewSession, PasswordHasher, RefreshTokenProvider,
-        SessionRepository, SettingsRepository, Tx, UnitOfWork, UserRepository,
+        AccessTokenCodec, AuditEvent, AuditRepository, Clock, NewSession, PasswordHasher,
+        RefreshTokenProvider, SessionRepository, SettingsRepository, Tx, UnitOfWork,
+        UserRepository,
     },
 };
 
@@ -126,6 +130,7 @@ pub struct AuthService {
     clock: Arc<dyn Clock>,
     settings: Arc<dyn SettingsRepository>,
     uow: Arc<dyn UnitOfWork>,
+    audit: Arc<dyn AuditRepository>,
     policy: AuthPolicy,
 }
 
@@ -140,6 +145,7 @@ impl AuthService {
         clock: Arc<dyn Clock>,
         settings: Arc<dyn SettingsRepository>,
         uow: Arc<dyn UnitOfWork>,
+        audit: Arc<dyn AuditRepository>,
         policy: AuthPolicy,
     ) -> Self {
         Self {
@@ -151,6 +157,7 @@ impl AuthService {
             clock,
             settings,
             uow,
+            audit,
             policy,
         }
     }
@@ -165,8 +172,14 @@ impl AuthService {
             ports.clock.clone(),
             ports.settings.clone(),
             ports.uow.clone(),
+            ports.audit.clone(),
             policy,
         )
+    }
+
+    /// Событие над аккаунтом `user`; `actor = None` — действие системы.
+    fn user_event(actor: Option<UserId>, action: &'static str, user: UserId) -> AuditEvent {
+        AuditEvent::new(actor, action, audit_targets::USER, Some(user.0))
     }
 
     /// Вход по email + паролю.
@@ -193,8 +206,13 @@ impl AuthService {
             return Err(AuthError::AccountDisabled);
         }
 
+        // Неудачные входы в журнал не пишем: каждый такой запрос открывал бы транзакцию
+        // на чужой ввод. От перебора защищает лимит запросов, следы есть в логах (WARN).
         let mut tx = self.uow.begin().await?;
         let tokens = self.start_session(&mut *tx, creds.user.id).await?;
+        let user_id = creds.user.id;
+        let event = Self::user_event(Some(user_id), audit_actions::AUTH_LOGIN, user_id);
+        self.audit.record(&mut *tx, &event).await?;
         tx.commit().await?;
         Ok(LoginResult {
             user: creds.user,
@@ -230,9 +248,14 @@ impl AuthService {
                 "повторное использование отозванного refresh-токена: отзываем все сессии пользователя"
             );
             let mut tx = self.uow.begin().await?;
-            self.sessions
+            let revoked = self
+                .sessions
                 .revoke_all_for_user(&mut *tx, session.user_id, now)
                 .await?;
+            let event = Self::user_event(None, audit_actions::AUTH_REFRESH_REPLAY, session.user_id)
+                .detail("session_id", session.id.0.to_string())
+                .detail("sessions_revoked", revoked.to_string());
+            self.audit.record(&mut *tx, &event).await?;
             tx.commit().await?;
             return Err(AuthError::Unauthorized);
         }
@@ -287,7 +310,17 @@ impl AuthService {
                 .revoke(&mut *tx, session.user_id, session.id, now)
                 .await
             {
-                Ok(()) | Err(AuthError::NotFound) => {}
+                Ok(()) => {
+                    let event = Self::user_event(
+                        Some(session.user_id),
+                        audit_actions::AUTH_LOGOUT,
+                        session.user_id,
+                    )
+                    .detail("session_id", session.id.0.to_string());
+                    self.audit.record(&mut *tx, &event).await?;
+                }
+                // сессию уже отозвал параллельный запрос — он и запишет выход
+                Err(AuthError::NotFound) => {}
                 Err(e) => return Err(e),
             }
             tx.commit().await?;
@@ -302,6 +335,13 @@ impl AuthService {
             .sessions
             .revoke_all_for_user(&mut *tx, ctx.user.id, self.clock.now())
             .await?;
+        let event = Self::user_event(
+            Some(ctx.user.id),
+            audit_actions::AUTH_LOGOUT_ALL,
+            ctx.user.id,
+        )
+        .detail("sessions_revoked", count_sessions.to_string());
+        self.audit.record(&mut *tx, &event).await?;
         tx.commit().await?;
         Ok(count_sessions)
     }
@@ -342,6 +382,14 @@ impl AuthService {
             .sessions
             .revoke_all_for_user_except(&mut *tx, ctx.user.id, ctx.session_id, self.clock.now())
             .await?;
+        // сам пароль в журнал не идёт — только факт смены
+        let event = Self::user_event(
+            Some(ctx.user.id),
+            audit_actions::USER_PASSWORD_CHANGE,
+            ctx.user.id,
+        )
+        .detail("sessions_revoked", count.to_string());
+        self.audit.record(&mut *tx, &event).await?;
         tx.commit().await?;
         Ok(count)
     }
@@ -402,6 +450,9 @@ impl AuthService {
         let mut tx = self.uow.begin().await?;
         let user = self.users.create(&mut *tx, &new).await?;
         let tokens = self.start_session(&mut *tx, user.id).await?;
+        let event = Self::user_event(Some(user.id), audit_actions::USER_REGISTER, user.id)
+            .detail("email", user.email.as_str());
+        self.audit.record(&mut *tx, &event).await?;
         tx.commit().await?;
         Ok(LoginResult { user, tokens })
     }
@@ -602,6 +653,79 @@ mod tests {
             h.auth.authenticate(&access).await,
             Err(AuthError::Unauthorized)
         ));
+        // повторный и чужой выход ничего не меняют — и в журнал не попадают
+        assert_eq!(
+            h.audit.actions(),
+            [audit_actions::AUTH_LOGIN, audit_actions::AUTH_LOGOUT]
+        );
+    }
+
+    #[tokio::test]
+    async fn own_account_actions_are_audited_without_secrets() {
+        let h = Harness::new();
+        let user = h.users.seed("klai@example.com", "old-password", true);
+
+        assert!(matches!(
+            h.auth
+                .login("klai@example.com", &pw("wrong-password"))
+                .await,
+            Err(AuthError::InvalidCredentials)
+        ));
+        let device_a = h
+            .auth
+            .login("klai@example.com", &pw("old-password"))
+            .await
+            .unwrap()
+            .tokens;
+        let device_b = h
+            .auth
+            .login("klai@example.com", &pw("old-password"))
+            .await
+            .unwrap()
+            .tokens;
+        let ctx = h
+            .auth
+            .authenticate(device_a.access_token.expose_secret())
+            .await
+            .unwrap();
+
+        h.auth
+            .change_own_password(&ctx, &pw("old-password"), &pw("new-password-1"))
+            .await
+            .unwrap();
+        h.auth.logout_all(ctx).await.unwrap();
+        // device_b отозван сменой пароля; его повторное предъявление — replay
+        assert!(h.auth.refresh(&device_b.refresh_token).await.is_err());
+
+        assert_eq!(
+            h.audit.actions(),
+            [
+                audit_actions::AUTH_LOGIN,
+                audit_actions::AUTH_LOGIN,
+                audit_actions::USER_PASSWORD_CHANGE,
+                audit_actions::AUTH_LOGOUT_ALL,
+                audit_actions::AUTH_REFRESH_REPLAY,
+            ],
+            "неудачный вход в журнал не пишется"
+        );
+        let events = h.audit.events();
+        assert!(
+            events
+                .iter()
+                .all(|e| e.target_id == Some(user.id.0) && e.target_type == audit_targets::USER)
+        );
+        assert_eq!(events[2].details["sessions_revoked"], "1");
+        assert_eq!(
+            events[4].actor, None,
+            "реакция системы, а не действие пользователя"
+        );
+        assert!(
+            events
+                .iter()
+                .flat_map(|e| e.details.values())
+                .all(|v| !v.contains("password")),
+            "пароли не должны попасть в аудит"
+        );
     }
 
     #[tokio::test]
@@ -864,6 +988,7 @@ mod register_tests {
             h.clock.clone(),
             crate::testing::MemSettings::new(true),
             h.uow.clone(),
+            h.audit.clone(),
             AuthPolicy::default(),
         );
 
@@ -887,5 +1012,15 @@ mod register_tests {
             })
             .await;
         assert!(matches!(dup, Err(AuthError::Conflict)));
+
+        let events = h.audit.events();
+        assert_eq!(
+            events.len(),
+            1,
+            "повторная регистрация в журнал не попадает"
+        );
+        assert_eq!(events[0].action, audit_actions::USER_REGISTER);
+        assert_eq!(events[0].actor, Some(res.user.id));
+        assert_eq!(events[0].details["email"], "new@example.com");
     }
 }

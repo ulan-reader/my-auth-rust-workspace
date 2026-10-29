@@ -20,6 +20,7 @@ pub mod admin_permissions {
     pub const ROLES_ASSIGN: &str = "roles.assign";
     pub const PERMISSIONS_VIEW: &str = "permissions.view";
     pub const SETTINGS_MANAGE: &str = "settings.manage";
+    pub const AUDIT_VIEW: &str = "audit.view";
 }
 
 #[derive(Clone)]
@@ -47,6 +48,25 @@ impl AccessService {
         self.permissions
             .effective_for_user(ctx.user.id, scope)
             .await
+    }
+
+    /// Свои права — для клиента (вики решает, какие кнопки показать).
+    /// Смотреть своё может каждый вошедший, отдельного права не нужно.
+    /// `scope = None` — только глобальные; `Some(s)` — глобальные плюс в `s`.
+    #[instrument(skip_all, fields(actor = %ctx.user_id()), err(level = Level::WARN))]
+    pub async fn my_permissions(
+        &self,
+        ctx: &AuthContext,
+        scope: Option<&str>,
+    ) -> Result<Vec<PermissionCode>> {
+        let scope = scope.map(ScopeId::parse).transpose()?;
+        let mut codes: Vec<_> = self
+            .granted(ctx, scope.as_ref())
+            .await?
+            .into_iter()
+            .collect();
+        codes.sort();
+        Ok(codes)
     }
 
     /// `scope = None` — считаются только глобальные роли. `Some(s)` — глобальные
@@ -204,6 +224,42 @@ mod tests {
             .require_permission(&ctx, admin_permissions::USERS_MANAGE, None)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn my_permissions_are_sorted_and_respect_scope() {
+        let h = Harness::new();
+        let ctx = ctx_for(&h);
+        h.permissions
+            .grant(ctx.user_id(), None, "wiki.comment.create");
+        h.permissions
+            .grant(ctx.user_id(), Some("space:wiki"), "wiki.article.delete");
+        h.permissions
+            .grant(ctx.user_id(), Some("space:hr"), "hr.view");
+
+        let codes = |v: Vec<PermissionCode>| {
+            v.into_iter()
+                .map(|c| c.as_str().to_owned())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            codes(h.access.my_permissions(&ctx, None).await.unwrap()),
+            ["wiki.comment.create"]
+        );
+        assert_eq!(
+            codes(
+                h.access
+                    .my_permissions(&ctx, Some("space:wiki"))
+                    .await
+                    .unwrap()
+            ),
+            ["wiki.article.delete", "wiki.comment.create"]
+        );
+        assert!(matches!(
+            h.access.my_permissions(&ctx, Some("bad scope!")).await,
+            Err(AuthError::Validation(_))
+        ));
     }
 
     #[tokio::test]

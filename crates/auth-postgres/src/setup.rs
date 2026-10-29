@@ -100,6 +100,19 @@ impl SetupRepository for PgSetupRepository {
             .await
             .map_err(map_db_error)?;
 
+        // код действия — `audit_actions::SETUP_COMPLETE`; сам себя и создал
+        sqlx::query(
+            r#"
+            insert into audit_events (actor_id, action, target_type, target_id, details)
+            values ($1, 'setup.complete', 'user', $1, jsonb_build_object('email', $2::text))
+            "#,
+        )
+        .bind(user.id)
+        .bind(new.email.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(map_db_error)?;
+
         sqlx::query("update app_settings set setup_completed_at = $1 where id = 1")
             .bind(now)
             .execute(&mut *tx)

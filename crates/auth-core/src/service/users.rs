@@ -6,13 +6,16 @@ use std::sync::Arc;
 use secrecy::{ExposeSecret, SecretString};
 use tracing::{Level, info, instrument};
 
-use super::{AccessService, AuthContext, Ports, admin_permissions as perm};
+use super::{
+    AccessService, AuthContext, Ports, admin_permissions as perm,
+    audit::{audit_actions, audit_targets},
+};
 use crate::{
     AuthError, Result,
     domain::*,
     ports::{
-        AssignmentRepository, Clock, NewUser, Page, PageRequest, PasswordHasher, SessionRepository,
-        UnitOfWork, UserRepository, UserUpdate,
+        AssignmentRepository, AuditEvent, AuditRepository, Clock, NewUser, Page, PageRequest,
+        PasswordHasher, SessionRepository, UnitOfWork, UserRepository, UserUpdate,
     },
 };
 
@@ -71,9 +74,11 @@ pub struct UserService {
     clock: Arc<dyn Clock>,
     access: AccessService,
     uow: Arc<dyn UnitOfWork>,
+    audit: Arc<dyn AuditRepository>,
 }
 
 impl UserService {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         users: Arc<dyn UserRepository>,
         assignments: Arc<dyn AssignmentRepository>,
@@ -82,6 +87,7 @@ impl UserService {
         clock: Arc<dyn Clock>,
         access: AccessService,
         uow: Arc<dyn UnitOfWork>,
+        audit: Arc<dyn AuditRepository>,
     ) -> Self {
         Self {
             users,
@@ -91,6 +97,7 @@ impl UserService {
             clock,
             access,
             uow,
+            audit,
         }
     }
 
@@ -103,6 +110,16 @@ impl UserService {
             ports.clock.clone(),
             AccessService::from_ports(ports),
             ports.uow.clone(),
+            ports.audit.clone(),
+        )
+    }
+
+    fn event(actor: &AuthContext, action: &'static str, target: UserId) -> AuditEvent {
+        AuditEvent::new(
+            Some(actor.user_id()),
+            action,
+            audit_targets::USER,
+            Some(target.0),
         )
     }
 
@@ -157,6 +174,9 @@ impl UserService {
 
         let mut tx = self.uow.begin().await?;
         let user = self.users.create(&mut *tx, &new).await?;
+        let event = Self::event(actor, audit_actions::USER_CREATE, user.id)
+            .detail("email", user.email.as_str());
+        self.audit.record(&mut *tx, &event).await?;
         tx.commit().await?;
 
         Ok(UserWithRoles {
@@ -185,6 +205,11 @@ impl UserService {
 
         let mut tx = self.uow.begin().await?;
         let user = self.users.update(&mut *tx, id, &upd).await?;
+        let event = Self::event(actor, audit_actions::USER_UPDATE, id)
+            .detail("email", user.email.as_str())
+            .detail("first_name", &user.first_name)
+            .detail("second_name", &user.second_name);
+        self.audit.record(&mut *tx, &event).await?;
         tx.commit().await?;
 
         self.with_roles(user).await
@@ -209,9 +234,14 @@ impl UserService {
         let mut tx = self.uow.begin().await?;
 
         self.users.set_password_hash(&mut *tx, id, &hash).await?;
-        self.sessions
+        let revoked = self
+            .sessions
             .revoke_all_for_user(&mut *tx, id, self.clock.now())
             .await?;
+        // сам пароль и хеш в журнал не идут — только факт смены
+        let event = Self::event(actor, audit_actions::USER_PASSWORD_SET, id)
+            .detail("sessions_revoked", revoked.to_string());
+        self.audit.record(&mut *tx, &event).await?;
 
         tx.commit().await?;
         Ok(())
@@ -232,13 +262,18 @@ impl UserService {
         let mut tx = self.uow.begin().await?;
 
         self.users.set_active(&mut *tx, id, active).await?;
-        if !active {
+        let event = if active {
+            Self::event(actor, audit_actions::USER_ACTIVATE, id)
+        } else {
             let revoked = self
                 .sessions
                 .revoke_all_for_user(&mut *tx, id, self.clock.now())
                 .await?;
             info!(revoked, "пользователь деактивирован, сессии отозваны");
-        }
+            Self::event(actor, audit_actions::USER_DEACTIVATE, id)
+                .detail("sessions_revoked", revoked.to_string())
+        };
+        self.audit.record(&mut *tx, &event).await?;
 
         tx.commit().await?;
         Ok(())
@@ -257,6 +292,8 @@ impl UserService {
         }
         let mut tx = self.uow.begin().await?;
         self.users.delete(&mut *tx, id).await?;
+        let event = Self::event(actor, audit_actions::USER_DELETE, id);
+        self.audit.record(&mut *tx, &event).await?;
         tx.commit().await
     }
 
@@ -316,6 +353,7 @@ mod tests {
             h.clock.clone(),
             h.access.clone(),
             h.uow.clone(),
+            h.audit.clone(),
         );
         let admin = h.users.seed("admin@example.com", "admin-password", true);
         for code in [perm::USERS_VIEW, perm::USERS_MANAGE] {
@@ -555,6 +593,25 @@ mod tests {
             f.svc.set_password(&f.admin, target.id, &pw("short")).await,
             Err(AuthError::Validation(_))
         ));
+
+        // в журнале — только факт смены, отказ (короткий пароль) не пишется;
+        // входы через `h.auth` тоже пишутся, их отсекаем
+        let events: Vec<_> =
+            f.h.audit
+                .events()
+                .into_iter()
+                .filter(|e| e.action == audit_actions::USER_PASSWORD_SET)
+                .collect();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, audit_actions::USER_PASSWORD_SET);
+        assert_eq!(events[0].target_id, Some(target.id.0));
+        assert!(
+            events[0]
+                .details
+                .values()
+                .all(|v| !v.contains("brand-new-pass")),
+            "пароль не должен попасть в аудит"
+        );
     }
 
     #[tokio::test]

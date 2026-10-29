@@ -4,13 +4,18 @@ use std::{collections::HashSet, sync::Arc};
 
 use tracing::{Level, instrument};
 
-use super::{AccessService, AuthContext, Ports, access::require_subset, admin_permissions as perm};
+use super::{
+    AccessService, AuthContext, Ports,
+    access::require_subset,
+    admin_permissions as perm,
+    audit::{audit_actions, audit_targets},
+};
 use crate::{
     AuthError, Result,
     domain::*,
     ports::{
-        AssignmentRepository, LockedRole, NewRole, Page, PageRequest, RoleRepository, RoleUpdate,
-        UnitOfWork,
+        AssignmentRepository, AuditEvent, AuditRepository, LockedRole, NewRole, Page, PageRequest,
+        RoleRepository, RoleUpdate, UnitOfWork,
     },
 };
 
@@ -42,6 +47,7 @@ pub struct RoleService {
     assignments: Arc<dyn AssignmentRepository>,
     access: AccessService,
     uow: Arc<dyn UnitOfWork>,
+    audit: Arc<dyn AuditRepository>,
 }
 
 impl RoleService {
@@ -50,12 +56,14 @@ impl RoleService {
         assignments: Arc<dyn AssignmentRepository>,
         access: AccessService,
         uow: Arc<dyn UnitOfWork>,
+        audit: Arc<dyn AuditRepository>,
     ) -> Self {
         Self {
             roles,
             assignments,
             access,
             uow,
+            audit,
         }
     }
 
@@ -65,7 +73,37 @@ impl RoleService {
             ports.assignments.clone(),
             AccessService::from_ports(ports),
             ports.uow.clone(),
+            ports.audit.clone(),
         )
+    }
+
+    fn role_event(actor: &AuthContext, action: &'static str, role: &Role) -> AuditEvent {
+        AuditEvent::new(
+            Some(actor.user_id()),
+            action,
+            audit_targets::ROLE,
+            Some(role.id.0),
+        )
+        .detail("code", role.code.as_str())
+    }
+
+    /// Назначение пишется на пользователя: «что меняли у человека» ищут по нему.
+    fn assignment_event(
+        actor: &AuthContext,
+        action: &'static str,
+        user: UserId,
+        role: &Role,
+        scope: Option<&ScopeId>,
+    ) -> AuditEvent {
+        AuditEvent::new(
+            Some(actor.user_id()),
+            action,
+            audit_targets::USER,
+            Some(user.0),
+        )
+        .scope(scope)
+        .detail("role_id", role.id.0.to_string())
+        .detail("role", role.code.as_str())
     }
 
     #[instrument(skip_all, fields(actor = %actor.user_id()), err(level = Level::WARN))]
@@ -99,6 +137,10 @@ impl RoleService {
 
         let mut tx = self.uow.begin().await?;
         let role: Role = self.roles.create(&mut *tx, &new).await?;
+        let event = Self::role_event(actor, audit_actions::ROLE_CREATE, &role)
+            .detail("name", &role.name)
+            .detail("scope", role.scope.as_str());
+        self.audit.record(&mut *tx, &event).await?;
         tx.commit().await?;
         Ok(role)
     }
@@ -121,7 +163,7 @@ impl RoleService {
             code: RoleCode::parse(&input.code)?,
             name: clean_name(&input.name)?,
         };
-        
+
         let mut tx = self.uow.begin().await?;
         let locked = self
             .roles
@@ -136,6 +178,11 @@ impl RoleService {
         }
 
         let role = self.roles.update(&mut *tx, id, &upd).await?;
+        let event = Self::role_event(actor, audit_actions::ROLE_UPDATE, &role)
+            .detail("old_code", locked.role.code.as_str())
+            .detail("old_name", &locked.role.name)
+            .detail("name", &role.name);
+        self.audit.record(&mut *tx, &event).await?;
         tx.commit().await?;
         Ok(role)
     }
@@ -157,6 +204,9 @@ impl RoleService {
         require_holds(&granted, &locked)?;
         ensure_not_system(&locked.role, "удалить")?;
         self.roles.delete(&mut *tx, id).await?;
+        let event = Self::role_event(actor, audit_actions::ROLE_DELETE, &locked.role)
+            .detail("permissions", join_codes(&locked.permissions));
+        self.audit.record(&mut *tx, &event).await?;
         tx.commit().await
     }
 
@@ -202,6 +252,10 @@ impl RoleService {
             .roles
             .set_permissions(&mut *tx, role, permission_ids)
             .await?;
+        let event = Self::role_event(actor, audit_actions::ROLE_PERMISSIONS_SET, &locked.role)
+            .detail("old_permissions", join_codes(&locked.permissions))
+            .detail("permissions", join_codes(&permissions));
+        self.audit.record(&mut *tx, &event).await?;
         tx.commit().await?;
         Ok(permissions)
     }
@@ -229,6 +283,14 @@ impl RoleService {
         self.assignments
             .assign(&mut *tx, input.user, input.role, scope.as_ref())
             .await?;
+        let event = Self::assignment_event(
+            actor,
+            audit_actions::ROLE_ASSIGN,
+            input.user,
+            &locked.role,
+            scope.as_ref(),
+        );
+        self.audit.record(&mut *tx, &event).await?;
         tx.commit().await
     }
 
@@ -249,8 +311,26 @@ impl RoleService {
         self.assignments
             .unassign(&mut *tx, input.user, input.role, scope.as_ref())
             .await?;
+        // пишем и когда назначения не было: попытку снять тоже полезно видеть
+        let event = Self::assignment_event(
+            actor,
+            audit_actions::ROLE_UNASSIGN,
+            input.user,
+            &locked.role,
+            scope.as_ref(),
+        );
+        self.audit.record(&mut *tx, &event).await?;
         tx.commit().await
     }
+}
+
+/// Коды прав через запятую — для деталей аудита.
+fn join_codes(permissions: &[Permission]) -> String {
+    permissions
+        .iter()
+        .map(|p| p.code.as_str())
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn clean_name(raw: &str) -> Result<String> {
@@ -304,7 +384,13 @@ mod tests {
         let h = Harness::new();
         let roles = Arc::new(MemRoles::default());
         let assignments = Arc::new(MemAssignments::default());
-        let svc = RoleService::new(roles, assignments, h.access.clone(), h.uow.clone());
+        let svc = RoleService::new(
+            roles,
+            assignments,
+            h.access.clone(),
+            h.uow.clone(),
+            h.audit.clone(),
+        );
         let admin = h.users.seed("admin@example.com", "admin-password", true);
         for code in [perm::ROLES_VIEW, perm::ROLES_MANAGE, perm::ROLES_ASSIGN] {
             h.permissions.grant(admin.id, None, code);
@@ -377,6 +463,64 @@ mod tests {
             f.svc.assign(&wiki_admin, assign(viewer.id, None)).await,
             Err(AuthError::Forbidden)
         ));
+    }
+
+    #[tokio::test]
+    async fn changes_are_audited_and_rejected_ones_are_not() {
+        let f = fixture();
+        let editor = f
+            .svc
+            .create(
+                &f.admin,
+                CreateRole {
+                    code: "wiki_editor".into(),
+                    name: "Wiki editor".into(),
+                    scope: RoleScope::Scoped,
+                },
+            )
+            .await
+            .unwrap();
+        let user = f.h.users.seed("user@example.com", "password-1", true);
+        let wiki = |s: &str| AssignRole {
+            user: user.id,
+            role: editor.id,
+            scope: Some(s.into()),
+        };
+
+        f.svc.assign(&f.admin, wiki("space:wiki")).await.unwrap();
+        // роль со scope без scope — отказ, в журнал не попадает
+        assert!(
+            f.svc
+                .assign(
+                    &f.admin,
+                    AssignRole {
+                        user: user.id,
+                        role: editor.id,
+                        scope: None,
+                    },
+                )
+                .await
+                .is_err()
+        );
+        f.svc.unassign(&f.admin, wiki("space:wiki")).await.unwrap();
+
+        assert_eq!(
+            f.h.audit.actions(),
+            [
+                audit_actions::ROLE_CREATE,
+                audit_actions::ROLE_ASSIGN,
+                audit_actions::ROLE_UNASSIGN
+            ]
+        );
+        let assigned = &f.h.audit.events()[1];
+        assert_eq!(assigned.actor, Some(f.admin.user_id()));
+        assert_eq!(assigned.target_type, audit_targets::USER);
+        assert_eq!(assigned.target_id, Some(user.id.0));
+        assert_eq!(
+            assigned.scope.as_ref().map(ScopeId::as_str),
+            Some("space:wiki")
+        );
+        assert_eq!(assigned.details["role"], "wiki_editor");
     }
 
     #[tokio::test]

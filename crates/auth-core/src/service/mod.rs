@@ -1,6 +1,7 @@
 //! Use-case'ы: вся бизнес-логика. Зависят только от портов.
 
 mod access;
+mod audit;
 mod auth;
 mod roles;
 mod settings;
@@ -10,12 +11,13 @@ mod users;
 use std::sync::Arc;
 
 use crate::ports::{
-    AccessTokenCodec, AssignmentRepository, Clock, PasswordHasher, PermissionRepository,
-    RefreshTokenProvider, RoleRepository, SessionRepository, SettingsRepository, SetupRepository,
-    UnitOfWork, UserRepository,
+    AccessTokenCodec, AssignmentRepository, AuditRepository, Clock, PasswordHasher,
+    PermissionRepository, RefreshTokenProvider, RoleRepository, SessionRepository,
+    SettingsRepository, SetupRepository, UnitOfWork, UserRepository,
 };
 
 pub use access::{AccessService, admin_permissions};
+pub use audit::{AuditService, audit_actions};
 pub use auth::{AuthContext, AuthPolicy, AuthService, LoginResult, RegisterInput, TokenPair};
 pub use roles::{AssignRole, CreateRole, RoleService, UpdateRole};
 pub use settings::SettingsService;
@@ -38,4 +40,5 @@ pub struct Ports {
     pub settings: Arc<dyn SettingsRepository>,
     pub setup: Arc<dyn SetupRepository>,
     pub uow: Arc<dyn UnitOfWork>,
+    pub audit: Arc<dyn AuditRepository>,
 }

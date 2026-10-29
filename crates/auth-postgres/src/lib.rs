@@ -2,6 +2,7 @@
 
 mod admin_guard;
 mod assignments;
+mod audit;
 mod error;
 mod permissions;
 mod pool;
@@ -13,6 +14,7 @@ mod tx;
 mod users;
 
 pub use assignments::PgAssignmentRepository;
+pub use audit::PgAuditRepository;
 pub use permissions::PgPermissionRepository;
 pub use pool::{PostgresConfig, connect, migrate, ping};
 pub use roles::PgRoleRepository;

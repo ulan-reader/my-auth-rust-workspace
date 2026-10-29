@@ -1,9 +1,13 @@
 use async_trait::async_trait;
-use auth_core::{Result, domain::RuntimeSettings, ports::SettingsRepository};
+use auth_core::{
+    Result,
+    domain::RuntimeSettings,
+    ports::{SettingsRepository, Tx},
+};
 use sqlx::PgPool;
 use tracing::instrument;
 
-use crate::error::map_db_error;
+use crate::{error::map_db_error, tx::PgTx};
 
 pub struct PgSettingsRepository {
     pool: PgPool,
@@ -29,11 +33,12 @@ impl SettingsRepository for PgSettingsRepository {
         })
     }
 
-    #[instrument(skip(self), err)]
-    async fn set_allow_self_registration(&self, allowed: bool) -> Result<()> {
+    #[instrument(skip(self, tx), err)]
+    async fn set_allow_self_registration(&self, tx: &mut dyn Tx, allowed: bool) -> Result<()> {
+        let conn = PgTx::from_dyn(tx)?.conn();
         sqlx::query("update app_settings set allow_self_registration = $1 where id = 1")
             .bind(allowed)
-            .execute(&self.pool)
+            .execute(conn)
             .await
             .map_err(map_db_error)?;
         Ok(())

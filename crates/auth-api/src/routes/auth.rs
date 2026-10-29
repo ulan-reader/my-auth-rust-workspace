@@ -1,4 +1,8 @@
-use axum::{Json, Router, extract::State, routing::post};
+use axum::{
+    Json, Router,
+    extract::{Query, State},
+    routing::{get, post},
+};
 use secrecy::SecretString;
 use serde::Deserialize;
 
@@ -101,6 +105,33 @@ async fn me(
     Ok(Json(state.users.me(&ctx).await?.into()))
 }
 
+#[derive(Deserialize)]
+pub struct MyPermissionsQuery {
+    pub scope: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+pub struct MyPermissionsResponse {
+    pub scope: Option<String>,
+    pub permissions: Vec<String>,
+}
+
+/// Права текущего пользователя: глобальные, а с `?scope=` — плюс в этом scope.
+async fn my_permissions(
+    State(state): State<ApiState>,
+    AuthCtx(ctx): AuthCtx,
+    Query(q): Query<MyPermissionsQuery>,
+) -> Result<Json<MyPermissionsResponse>, ApiError> {
+    let codes = state
+        .access
+        .my_permissions(&ctx, q.scope.as_deref())
+        .await?;
+    Ok(Json(MyPermissionsResponse {
+        scope: q.scope,
+        permissions: codes.into_iter().map(|c| c.as_str().to_owned()).collect(),
+    }))
+}
+
 pub fn router(governor: std::sync::Arc<crate::rate_limit::Governor>) -> Router<ApiState> {
     let limited = Router::new()
         .route("/login", post(login))
@@ -112,7 +143,8 @@ pub fn router(governor: std::sync::Arc<crate::rate_limit::Governor>) -> Router<A
         .route("/refresh", post(refresh))
         .route("/logout", post(logout))
         .route("/logout-all", post(logout_all))
-        .route("/me", axum::routing::get(me));
+        .route("/me", get(me))
+        .route("/me/permissions", get(my_permissions));
 
     limited.merge(rest)
 }

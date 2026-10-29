@@ -13,8 +13,8 @@ use std::time::Duration;
 use auth_core::{
     ports::PermissionRepository,
     service::{
-        AccessService, AuthPolicy, AuthService, Ports, RoleService, SettingsService, SetupService,
-        UserService,
+        AccessService, AuditService, AuthPolicy, AuthService, Ports, RoleService, SettingsService,
+        SetupService, UserService,
     },
 };
 use axum::{
@@ -35,6 +35,7 @@ pub struct ApiState {
     pub permissions: Arc<dyn PermissionRepository>,
     pub settings: SettingsService,
     pub setup: SetupService,
+    pub audit: AuditService,
 }
 
 impl ApiState {
@@ -51,6 +52,7 @@ impl ApiState {
             permissions: ports.permissions.clone(),
             settings: SettingsService::from_ports(ports),
             setup: SetupService::from_ports(ports, setup_token),
+            audit: AuditService::from_ports(ports),
         }
     }
 }
@@ -131,6 +133,7 @@ pub fn router(state: ApiState, cfg: &ApiConfig) -> Result<Router, ConfigError> {
         .nest("/roles", routes::roles::router())
         .nest("/permissions", routes::roles::permissions_router())
         .nest("/settings", routes::settings::router())
+        .nest("/audit", routes::audit::router())
         .nest("/auth", routes::auth::router(governor.clone()))
         .nest("/setup", routes::setup::router(governor))
         .with_state(state)

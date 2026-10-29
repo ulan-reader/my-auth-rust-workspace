@@ -530,6 +530,7 @@ pub struct Harness {
     pub auth: AuthService,
     pub access: AccessService,
     pub uow: Arc<MemUnitOfWork>,
+    pub audit: Arc<MemAudit>,
 }
 
 impl Harness {
@@ -540,6 +541,7 @@ impl Harness {
         let hasher = Arc::new(FakeHasher::default());
         let permissions = Arc::new(MemPermissions::default());
         let uow = Arc::new(MemUnitOfWork::default());
+        let audit = Arc::new(MemAudit::default());
 
         let auth = AuthService::new(
             users.clone(),
@@ -550,6 +552,7 @@ impl Harness {
             clock.clone(),
             MemSettings::new(false),
             uow.clone(),
+            audit.clone(),
             AuthPolicy::default(),
         );
 
@@ -564,6 +567,7 @@ impl Harness {
             auth,
             access,
             uow,
+            audit,
         }
     }
 }
@@ -821,8 +825,71 @@ impl SettingsRepository for MemSettings {
         })
     }
 
-    async fn set_allow_self_registration(&self, allowed: bool) -> Result<()> {
+    async fn set_allow_self_registration(&self, _tx: &mut dyn Tx, allowed: bool) -> Result<()> {
         self.0.store(allowed, Ordering::SeqCst);
         Ok(())
+    }
+}
+
+// ---------- аудит ----------
+
+/// Заглушка не откатывает записи вместе с `MemTx`: проверять откат — дело
+/// интеграционных тестов на Postgres.
+#[derive(Default)]
+pub struct MemAudit {
+    events: Mutex<Vec<AuditEvent>>,
+}
+
+impl MemAudit {
+    /// Все записанные события, в порядке записи.
+    pub fn events(&self) -> Vec<AuditEvent> {
+        self.events.lock().unwrap().clone()
+    }
+
+    pub fn actions(&self) -> Vec<&'static str> {
+        self.events().iter().map(|e| e.action).collect()
+    }
+}
+
+#[async_trait]
+impl AuditRepository for MemAudit {
+    async fn record(&self, _tx: &mut dyn Tx, event: &AuditEvent) -> Result<()> {
+        self.events.lock().unwrap().push(event.clone());
+        Ok(())
+    }
+
+    async fn list(&self, filter: &AuditFilter, req: &PageRequest) -> Result<Page<AuditRecord>> {
+        let events = self.events.lock().unwrap();
+        let matching: Vec<AuditRecord> = events
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, e)| {
+                filter.actor.is_none_or(|a| e.actor == Some(a))
+                    && filter.action.as_deref().is_none_or(|a| e.action == a)
+                    && filter
+                        .target_type
+                        .as_deref()
+                        .is_none_or(|t| e.target_type == t)
+                    && filter.target_id.is_none_or(|t| e.target_id == Some(t))
+            })
+            .map(|(i, e)| AuditRecord {
+                id: i as i64 + 1,
+                at: Utc::now(),
+                actor: e.actor,
+                action: e.action.to_owned(),
+                target_type: e.target_type.to_owned(),
+                target_id: e.target_id,
+                scope: e.scope.clone(),
+                details: e.details.clone(),
+            })
+            .collect();
+        let total = matching.len() as i64;
+        let items = matching
+            .into_iter()
+            .skip(req.offset() as usize)
+            .take(req.per_page as usize)
+            .collect();
+        Ok(Page::new(items, req, total))
     }
 }

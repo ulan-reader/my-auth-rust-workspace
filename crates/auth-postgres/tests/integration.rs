@@ -13,8 +13,8 @@ use auth_core::{
     },
 };
 use auth_postgres::{
-    PgAssignmentRepository, PgPermissionRepository, PgRoleRepository, PgSessionRepository,
-    PgSetupRepository, PgUnitOfWork, PgUserRepository,
+    PgAssignmentRepository, PgAuditRepository, PgPermissionRepository, PgRoleRepository,
+    PgSessionRepository, PgSetupRepository, PgUnitOfWork, PgUserRepository,
 };
 use chrono::{TimeDelta, Utc};
 use sqlx::PgPool;
@@ -333,7 +333,7 @@ async fn assign_role_conflict_and_effective_permissions() {
     commit_tx(tx).await.unwrap();
 
     let perm_list = permissions.list().await.unwrap();
-    assert_eq!(perm_list.len(), 7, "права из сид-миграций");
+    assert_eq!(perm_list.len(), 8, "права из сид-миграций");
 
     let mut tx = begin_tx(&uow).await.unwrap();
     let created_perm = roles
@@ -823,4 +823,141 @@ async fn role_lock_makes_concurrent_set_permissions_wait() {
     commit_tx(tx1).await.unwrap();
     writer.await.unwrap().unwrap();
     assert_eq!(roles.permissions_of(role.id).await.unwrap().len(), 2);
+}
+
+fn audit_event(action: &'static str, target_id: i64) -> auth_core::ports::AuditEvent {
+    auth_core::ports::AuditEvent::new(None, action, "user", Some(target_id))
+        .scope(Some(&ScopeId::parse("space:wiki").unwrap()))
+        .detail("role", "wiki_editor")
+        .detail("note", "кавычки \" и запятые, не ломают jsonb")
+}
+
+#[tokio::test]
+async fn audit_is_written_in_tx_rolled_back_with_it_and_listed_newest_first() {
+    use auth_core::ports::{AuditFilter, AuditRepository};
+
+    let (_c, pool) = spin_up().await;
+    let audit = PgAuditRepository::new(pool.clone());
+    let uow = PgUnitOfWork::new(pool);
+
+    // откатилась транзакция — нет и записи
+    let mut tx = begin_tx(&uow).await.unwrap();
+    audit
+        .record(&mut *tx, &audit_event("role.assign", 1))
+        .await
+        .unwrap();
+    drop(tx);
+    let all = AuditFilter::default();
+    assert_eq!(
+        audit
+            .list(&all, &PageRequest::default())
+            .await
+            .unwrap()
+            .total,
+        0
+    );
+
+    for (action, target) in [("role.assign", 1), ("role.unassign", 1), ("role.assign", 2)] {
+        let mut tx = begin_tx(&uow).await.unwrap();
+        audit
+            .record(&mut *tx, &audit_event(action, target))
+            .await
+            .unwrap();
+        commit_tx(tx).await.unwrap();
+    }
+
+    let page = audit.list(&all, &PageRequest::default()).await.unwrap();
+    assert_eq!(page.total, 3);
+    let first = &page.items[0];
+    assert_eq!(
+        (first.action.as_str(), first.target_id),
+        ("role.assign", Some(2)),
+        "новые сверху"
+    );
+    assert_eq!(
+        first.scope.as_ref().map(ScopeId::as_str),
+        Some("space:wiki")
+    );
+    assert_eq!(first.details["role"], "wiki_editor");
+    assert_eq!(
+        first.details["note"],
+        "кавычки \" и запятые, не ломают jsonb"
+    );
+
+    let by_target = AuditFilter {
+        target_type: Some("user".into()),
+        target_id: Some(1),
+        ..Default::default()
+    };
+    assert_eq!(
+        audit
+            .list(&by_target, &PageRequest::default())
+            .await
+            .unwrap()
+            .total,
+        2
+    );
+    let assigns = AuditFilter {
+        action: Some("role.assign".into()),
+        ..Default::default()
+    };
+    let page = audit
+        .list(&assigns, &PageRequest::new(Some(2), Some(1), None))
+        .await
+        .unwrap();
+    assert_eq!((page.total, page.items.len()), (2, 1));
+    assert_eq!(page.items[0].target_id, Some(1));
+}
+
+#[tokio::test]
+async fn audit_rows_cannot_be_changed_or_deleted() {
+    use auth_core::ports::AuditRepository;
+
+    let (_c, pool) = spin_up().await;
+    let audit = PgAuditRepository::new(pool.clone());
+    let uow = PgUnitOfWork::new(pool.clone());
+    let mut tx = begin_tx(&uow).await.unwrap();
+    audit
+        .record(&mut *tx, &audit_event("role.assign", 1))
+        .await
+        .unwrap();
+    commit_tx(tx).await.unwrap();
+
+    for sql in [
+        "update audit_events set action = 'x'",
+        "delete from audit_events",
+        "truncate audit_events",
+    ] {
+        assert!(
+            sqlx::query(sql).execute(&pool).await.is_err(),
+            "{sql} должен быть запрещён"
+        );
+    }
+}
+
+#[tokio::test]
+async fn setup_writes_audit_and_admin_gets_audit_view() {
+    use auth_core::ports::{AuditFilter, AuditRepository};
+
+    let (_c, pool) = spin_up().await;
+    let admin = PgSetupRepository::new(pool.clone())
+        .create_first_admin(&new_user("first@example.com"), Utc::now())
+        .await
+        .unwrap();
+
+    let page = PgAuditRepository::new(pool.clone())
+        .list(&AuditFilter::default(), &PageRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(page.total, 1);
+    let event = &page.items[0];
+    assert_eq!(event.action, "setup.complete");
+    assert_eq!(event.actor, Some(admin.id));
+    assert_eq!(event.details["email"], "first@example.com");
+
+    let granted = PgPermissionRepository::new(pool)
+        .effective_for_user(admin.id, None)
+        .await
+        .unwrap();
+    assert!(granted.contains(&auth_core::domain::PermissionCode::parse("audit.view").unwrap()));
 }
